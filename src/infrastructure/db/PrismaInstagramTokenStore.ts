@@ -8,15 +8,16 @@ const prisma = new PrismaClient();
 
 export class PrismaInstagramTokenStore implements IInstagramTokenStore {
   async get(igUserId: string): Promise<InstagramTokenRecord | null> {
-    const row = await prisma.instagramToken.findUnique({
-      where: { igUserId }
+    // No seu schema Prisma, o IG user id deve estar em "instagramId"
+    const row = await prisma.instagramAccount.findUnique({
+      where: { instagramId: igUserId }
     });
 
     if (!row) return null;
 
     return {
-      accessToken: row.accessToken,
-      expiresAt: row.expiresAt ?? undefined
+      accessToken: row.accessToken ?? "",
+      expiresAt: row.accessTokenExpiresAt ?? undefined
     };
   }
 
@@ -25,16 +26,16 @@ export class PrismaInstagramTokenStore implements IInstagramTokenStore {
     accessToken: string,
     expiresAt?: Date | null
   ): Promise<void> {
-    await prisma.instagramToken.upsert({
-      where: { igUserId },
+    await prisma.instagramAccount.upsert({
+      where: { instagramId: igUserId },
       create: {
-        igUserId,
+        instagramId: igUserId,
         accessToken,
-        expiresAt: expiresAt ?? null
+        accessTokenExpiresAt: expiresAt ?? null
       },
       update: {
         accessToken,
-        expiresAt: expiresAt ?? null
+        accessTokenExpiresAt: expiresAt ?? null
       }
     });
   }
