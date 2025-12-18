@@ -17,15 +17,15 @@ model User {
   updatedAt    DateTime @updatedAt
 
   // Relação com as contas de Instagram
-  instagramAccounts InstagramAccount[]
+  instagramAccounts InstagramAccount[] @relation("UserInstagramAccounts")
 }
 
 model InstagramAccount {
   // Campos principais
   id                String  @id @default(uuid()) @map("Id")
-  ownerUserId       String? @map("OwnerUserId")
-  instagramId       String? @unique @map("InstagramId")
+  instagramId       String  @unique @map("InstagramId") // ✅ obrigatório
   instagramUserName String? @map("InstagramUserName")
+  accountType       String? @map("AccountType") // ✅ novo campo
   facebookPageId    String? @map("FacebookPageId")
 
   // Tokens e escopos
@@ -39,10 +39,10 @@ model InstagramAccount {
   createdAt       DateTime  @default(now()) @map("CreatedAt")
   updatedAt       DateTime  @updatedAt @map("UpdatedAt")
 
-  // Relação com User (equivalente ao OwnerUserId do sistema antigo)
+  // Relação com User
   userId String? @map("UserId")
-  user   User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user   User?   @relation("UserInstagramAccounts", fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
-  @@map("InstagramAccounts") // nome físico da tabela no banco
+  @@map("InstagramAccounts")
 }

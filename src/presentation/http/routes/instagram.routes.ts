@@ -18,6 +18,12 @@ const controller = makeInstagramAuthController();
  *           type: boolean
  *         required: false
  *         description: Se true (default), redireciona direto para o Instagram.
+ *       - in: query
+ *         name: state
+ *         schema:
+ *           type: string
+ *         required: false
+ *         description: Opcional. Pode ser usado como "returnTo" (rota do front) ou state aleatório.
  *     responses:
  *       200:
  *         description: URL de login retornada (quando redirect=false)
@@ -39,7 +45,7 @@ instagramRouter.get("/start", (req, res) => controller.start(req, res));
  *           type: string
  *       - in: query
  *         name: state
- *         required: true
+ *         required: false
  *         schema:
  *           type: string
  */
@@ -64,5 +70,33 @@ instagramRouter.get("/status", (req, res) => controller.status(req, res));
  *     summary: Desconecta a conta do Instagram
  */
 instagramRouter.post("/disconnect", (req, res) => controller.disconnect(req, res));
+
+/**
+ * @openapi
+ * /api/instagram/metrics:
+ *   get:
+ *     tags:
+ *       - Instagram
+ *     summary: Retorna métricas do Instagram para o dashboard
+ *     parameters:
+ *       - in: query
+ *         name: from
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Data inicial (YYYY-MM-DD)
+ *       - in: query
+ *         name: to
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Data final (YYYY-MM-DD)
+ *     responses:
+ *       200:
+ *         description: Métricas retornadas com sucesso
+ *       409:
+ *         description: Instagram não conectado
+ */
+instagramRouter.get("/metrics", (req, res) => controller.metrics(req, res));
 
 export default instagramRouter;

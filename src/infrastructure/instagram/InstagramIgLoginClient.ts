@@ -13,14 +13,7 @@ export interface LongTokenResponse {
 export interface MeResponse {
   igUserId: string;
   username: string;
-
-  /**
-   * No IG Graph API (IGUser) NÃO existe "account_type".
-   * Mantemos esse campo por compatibilidade com o resto do projeto.
-   */
   accountType: string;
-
-  // úteis para você salvar e usar depois
   facebookPageId?: string;
   pageAccessToken?: string;
 }
