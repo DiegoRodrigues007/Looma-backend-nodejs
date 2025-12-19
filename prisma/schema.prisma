@@ -16,32 +16,34 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  // Relação com as contas de Instagram
-  instagramAccounts InstagramAccount[] @relation("UserInstagramAccounts")
+  instagramAccounts InstagramAccount[]
+
+  @@map("User")
 }
 
 model InstagramAccount {
-  // Campos principais
-  id                String  @id @default(uuid()) @map("Id")
-  instagramId       String  @unique @map("InstagramId") // ✅ obrigatório
-  instagramUserName String? @map("InstagramUserName")
-  accountType       String? @map("AccountType") // ✅ novo campo
-  facebookPageId    String? @map("FacebookPageId")
+  id                String  @id @default(uuid())
+  instagramId       String  @unique
+  instagramUserName String?
+  accountType       String?
+  facebookPageId    String?
 
-  // Tokens e escopos
-  accessToken          String?   @map("AccessToken")
-  pageAccessToken      String?   @map("PageAccessToken")
-  accessTokenExpiresAt DateTime? @map("AccessTokenExpiresAt")
-  grantedScopes        String?   @map("GrantedScopes")
+  accessToken          String?
+  pageAccessToken      String?
+  accessTokenExpiresAt DateTime?
+  grantedScopes        String?
 
-  // Datas de controle
-  lastRefreshedAt DateTime? @map("LastRefreshedAt")
-  createdAt       DateTime  @default(now()) @map("CreatedAt")
-  updatedAt       DateTime  @updatedAt @map("UpdatedAt")
+  // ✅ NOVO: usado pelo TokenStore
+  lastRefreshedAt DateTime?
 
-  // Relação com User
-  userId String? @map("UserId")
-  user   User?   @relation("UserInstagramAccounts", fields: [userId], references: [id], onDelete: Cascade)
+  // ✅ flag de vínculo (conectado/desconectado)
+  isConnected Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@map("InstagramAccounts")

@@ -6,11 +6,9 @@ export interface InstagramLoginResult {
   username: string;
   accountType: string;
 
-  // token principal que você vai usar para métricas (idealmente o PageAccessToken)
-  accessToken: string;
+  accessToken: string; // token principal (preferir pageAccessToken quando existir)
   expiresAt?: Date | null;
 
-  // extras importantes para IG Graph
   facebookPageId?: string | null;
   pageAccessToken?: string | null;
 }
@@ -21,46 +19,68 @@ export class CompleteIgLoginUseCase {
     private readonly tokenStore: IInstagramTokenStore
   ) {}
 
-  async execute(code: string, _state: string): Promise<InstagramLoginResult> {
-    // 1) troca code -> short user token
+  /**
+   * Completa o login do Instagram:
+   * - troca code -> short token
+   * - troca short -> long token
+   * - busca dados da conta
+   * - persiste tokens + marca como conectado (isConnected=true) vinculado ao userId
+   */
+  async execute(code: string, state: string, userId: string): Promise<InstagramLoginResult> {
+    if (!code || code.trim().length === 0) {
+      throw new Error("code é obrigatório");
+    }
+    if (!userId || userId.trim().length === 0) {
+      throw new Error("userId é obrigatório");
+    }
+
+    // 1) troca code -> short token
     const { shortToken } = await this.auth.exchangeCodeForShortToken(code);
 
-    // 2) troca short -> long-lived user token
+    // 2) troca short -> long token
     const { longToken, expiresAt } = await this.auth.exchangeShortForLong(shortToken);
 
-    // 3) pega dados do IG (retorna também facebookPageId + pageAccessToken quando existir)
+    // 3) pega dados do usuário/conta
     const me = await this.auth.getMe(longToken);
 
-    const igUserId = me.igUserId;
-    const username = me.username;
-    const accountType = me.accountType;
+    const igUserId = String(me.igUserId ?? "").trim();
+    const username = String(me.username ?? "").trim();
+    const accountType = String(me.accountType ?? "").trim();
 
-    const facebookPageId = me.facebookPageId ?? null;
-    const pageAccessToken = me.pageAccessToken ?? null;
+    if (!igUserId) throw new Error("Não foi possível obter igUserId do Instagram");
+    if (!username) throw new Error("Não foi possível obter username do Instagram");
+    if (!accountType) throw new Error("Não foi possível obter accountType do Instagram");
 
-    // Para métricas do IG Graph, geralmente o melhor é usar o PageAccessToken
-    const tokenToUseForMetrics = pageAccessToken ?? longToken;
+    const facebookPageId = me.facebookPageId ? String(me.facebookPageId) : null;
+    const pageAccessToken = me.pageAccessToken ? String(me.pageAccessToken) : null;
 
-    // 4) salva/atualiza tudo no banco (sem any)
+    // ✅ Para métricas, geralmente o PageAccessToken é o ideal
+    const tokenToPersist = pageAccessToken ?? longToken;
+
+    // 4) salva/atualiza no banco vinculado ao userId + marca conectado
     await this.tokenStore.saveOrUpdate({
+      userId,
       igUserId,
       username,
       accountType,
-      accessToken: longToken, 
+      accessToken: longToken,
       pageAccessToken,
       facebookPageId,
       expiresAt: expiresAt ?? null,
-      lastRefreshedAt: new Date()
+      lastRefreshedAt: new Date(),
+
+      // ✅ ESSENCIAL para o seu front renderizar "Conectado"
+      isConnected: true,
     });
 
     return {
       igUserId,
       username,
       accountType,
-      accessToken: tokenToUseForMetrics,
-      expiresAt: expiresAt ?? undefined,
+      accessToken: tokenToPersist,
+      expiresAt: expiresAt ?? null,
       facebookPageId,
-      pageAccessToken
+      pageAccessToken,
     };
   }
 }

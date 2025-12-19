@@ -1,77 +1,106 @@
 import { PrismaClient } from "@prisma/client";
-import {
+import type {
   IInstagramTokenStore,
   InstagramTokenRecord,
-  InstagramTokenUpsert
+  SaveOrUpdateInstagramTokenInput,
 } from "../../application/instagram/IInstagramTokenStore";
 
 const prisma = new PrismaClient();
 
 export class PrismaInstagramTokenStore implements IInstagramTokenStore {
-  async get(igUserId: string): Promise<InstagramTokenRecord | null> {
-    const row = await prisma.instagramAccount.findUnique({
-      where: { instagramId: igUserId }
+  async getByUserId(userId: string): Promise<InstagramTokenRecord | null> {
+    if (!userId) return null;
+
+    const row = await prisma.instagramAccount.findFirst({
+      where: { userId },
+      orderBy: { updatedAt: "desc" },
     });
 
-    // não achou
-    if (!row) return null;
-
-    // proteção extra caso seu schema permita instagramId null
-    if (!row.instagramId) return null;
+    // ✅ precisa ter instagramId e pelo menos 1 token
+    if (!row?.instagramId || (!row.accessToken && !row.pageAccessToken)) return null;
 
     return {
-      igUserId: row.instagramId, // ✅ agora sempre string
+      userId: row.userId ?? "",
+      igUserId: row.instagramId,
       accessToken: row.accessToken ?? "",
+      pageAccessToken: row.pageAccessToken ?? null,
+      facebookPageId: row.facebookPageId ?? null,
+      username: row.instagramUserName ?? null,
+      accountType: null, // não existe no schema atual
       expiresAt: row.accessTokenExpiresAt ?? null,
-
-      // extras (se existirem no schema)
-      username: (row as any).instagramUserName ?? null,
-      accountType: (row as any).accountType ?? null,
-      facebookPageId: (row as any).facebookPageId ?? null,
-      pageAccessToken: (row as any).pageAccessToken ?? null,
-      lastRefreshedAt: (row as any).lastRefreshedAt ?? null
+      lastRefreshedAt: row.lastRefreshedAt ?? null,
     };
   }
 
-  async saveOrUpdate(data: InstagramTokenUpsert): Promise<void> {
+  async saveOrUpdate(input: SaveOrUpdateInstagramTokenInput): Promise<void> {
     const {
+      userId,
       igUserId,
       username,
-      accountType,
       accessToken,
-      expiresAt,
-      facebookPageId,
       pageAccessToken,
-      lastRefreshedAt
-    } = data;
+      facebookPageId,
+      expiresAt,
+      lastRefreshedAt,
+    } = input;
 
-    if (!igUserId) {
-      throw new Error("igUserId é obrigatório para salvar token do Instagram");
+    if (!userId) throw new Error("userId é obrigatório para salvar token do Instagram");
+    if (!igUserId) throw new Error("igUserId é obrigatório para salvar token do Instagram");
+    if (!accessToken && !pageAccessToken) {
+      throw new Error("accessToken ou pageAccessToken é obrigatório para salvar token do Instagram");
     }
 
+    /**
+     * ✅ Ponto CRÍTICO:
+     * - No seu schema, instagramId normalmente é UNIQUE.
+     * - Então o upsert DEVE ser pelo instagramId.
+     *
+     * ✅ Também garantimos:
+     * - Nunca gravar string vazia (""), pra não “parecer token” quando não tem.
+     * - Só atualiza accessToken se vier definido (pra não apagar token existente por acidente).
+     */
     await prisma.instagramAccount.upsert({
       where: { instagramId: igUserId },
-      create: {
-        instagramId: igUserId,
-        accessToken,
-        accessTokenExpiresAt: expiresAt ?? null,
-
-        ...(facebookPageId !== undefined ? { facebookPageId } : {}),
-        ...(pageAccessToken !== undefined ? { pageAccessToken } : {}),
-        ...(username !== undefined ? { instagramUserName: username } : {}),
-        ...(accountType !== undefined ? { accountType } : {}),
-        ...(lastRefreshedAt !== undefined ? { lastRefreshedAt } : {})
-      } as any,
       update: {
-        accessToken,
-        accessTokenExpiresAt: expiresAt ?? null,
+        userId,
 
-        ...(facebookPageId !== undefined ? { facebookPageId } : {}),
-        ...(pageAccessToken !== undefined ? { pageAccessToken } : {}),
-        ...(username !== undefined ? { instagramUserName: username } : {}),
-        ...(accountType !== undefined ? { accountType } : {}),
-        ...(lastRefreshedAt !== undefined ? { lastRefreshedAt } : {})
-      } as any
+        instagramUserName: username ?? null,
+
+        // só atualiza accessToken se veio no input
+        ...(typeof accessToken === "string" && accessToken.trim().length > 0
+          ? { accessToken: accessToken.trim() }
+          : {}),
+
+        // pageAccessToken pode ser null (tudo bem)
+        pageAccessToken:
+          typeof pageAccessToken === "string" && pageAccessToken.trim().length > 0
+            ? pageAccessToken.trim()
+            : null,
+
+        facebookPageId: facebookPageId ?? null,
+        accessTokenExpiresAt: expiresAt ?? null,
+        lastRefreshedAt: lastRefreshedAt ?? null,
+      },
+      create: {
+        userId,
+        instagramId: igUserId,
+        instagramUserName: username ?? null,
+
+        // no create, precisa gravar algo consistente
+        accessToken:
+          typeof accessToken === "string" && accessToken.trim().length > 0
+            ? accessToken.trim()
+            : null, // ✅ melhor que ""
+
+        pageAccessToken:
+          typeof pageAccessToken === "string" && pageAccessToken.trim().length > 0
+            ? pageAccessToken.trim()
+            : null,
+
+        facebookPageId: facebookPageId ?? null,
+        accessTokenExpiresAt: expiresAt ?? null,
+        lastRefreshedAt: lastRefreshedAt ?? null,
+      },
     });
   }
 }
