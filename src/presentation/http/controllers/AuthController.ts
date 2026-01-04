@@ -3,6 +3,25 @@ import { RegisterUserUseCase } from "../../../application/use-cases/auth/Registe
 import { LoginUserUseCase } from "../../../application/use-cases/auth/LoginUserUseCase";
 import { GetCurrentUserUseCase } from "../../../application/use-cases/auth/GetCurrentUserUseCase";
 
+function pickEmailOrUserName(body: any): string | undefined {
+  const raw =
+    body?.emailOrUserName ??
+    body?.email ??
+    body?.login ??
+    body?.username ??
+    body?.userName;
+
+  if (raw === undefined || raw === null) return undefined;
+
+  const value = String(raw).trim();
+  if (!value) return undefined;
+
+  // Se parecer email, normaliza
+  if (value.includes("@")) return value.toLowerCase();
+
+  return value;
+}
+
 export class AuthController {
   constructor(
     private readonly registerUseCase: RegisterUserUseCase,
@@ -18,7 +37,17 @@ export class AuthController {
   };
 
   login = async (req: Request, res: Response) => {
-    const result = await this.loginUseCase.execute(req.body);
+    const emailOrUserName = pickEmailOrUserName(req.body);
+    const password = typeof req.body?.password === "string" ? req.body.password : "";
+
+    if (!emailOrUserName || !password) {
+      return res.status(400).json({ message: "Dados inválidos" });
+    }
+
+    // ✅ mantém compatibilidade com o use case atual
+    const payload = { ...req.body, emailOrUserName, password };
+
+    const result = await this.loginUseCase.execute(payload);
     if (!result.isSuccess) return res.status(400).json({ message: result.error });
 
     return res.json(result.value);

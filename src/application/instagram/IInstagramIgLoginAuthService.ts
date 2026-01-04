@@ -1,5 +1,3 @@
-// src/application/instagram/IInstagramIgLoginAuthService.ts
-
 export type InstagramMe = {
   igUserId: string;
   username: string;

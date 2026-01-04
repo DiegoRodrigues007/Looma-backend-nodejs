@@ -2,7 +2,7 @@ import axios, { AxiosInstance, AxiosError } from "axios";
 
 export interface ShortTokenResponse {
   shortToken: string;
-  userId?: string | null; // no Facebook OAuth, geralmente não vem user_id aqui
+  userId?: string | null; 
 }
 
 export interface LongTokenResponse {
@@ -23,7 +23,6 @@ type PageItem = { id: string; name?: string; access_token?: string };
 export class InstagramIgLoginClient {
   private http: AxiosInstance;
 
-  // Facebook/Graph (Business/Creator)
   private graphBaseUrl =
     process.env.INSTAGRAM_GRAPH_BASE_URL ?? "https://graph.facebook.com/v21.0";
   private authUrl =
@@ -35,7 +34,6 @@ export class InstagramIgLoginClient {
   private clientSecret = process.env.INSTAGRAM_CLIENT_SECRET!;
   private redirectUri = process.env.INSTAGRAM_REDIRECT_URI!;
 
-  // scopes corretos pra IG Business/Creator via Graph
   private scopes = (
     process.env.INSTAGRAM_SCOPES ??
     "public_profile,email,pages_show_list,pages_read_engagement,instagram_basic,instagram_manage_insights"
@@ -64,9 +62,6 @@ export class InstagramIgLoginClient {
     return `${this.authUrl}?${params.toString()}`;
   }
 
-  /**
-   * code -> user access token (short-lived)
-   */
   async exchangeCodeForShortToken(code: string): Promise<ShortTokenResponse> {
     try {
       const res = await axios.get(this.tokenUrl, {
@@ -85,9 +80,6 @@ export class InstagramIgLoginClient {
     }
   }
 
-  /**
-   * short-lived -> long-lived (fb_exchange_token)
-   */
   async exchangeShortForLong(shortToken: string): Promise<LongTokenResponse> {
     try {
       const res = await axios.get(this.tokenUrl, {
@@ -109,9 +101,6 @@ export class InstagramIgLoginClient {
     }
   }
 
-  /**
-   * "refresh" de long-lived: re-exchange (prático)
-   */
   async refreshLong(longToken: string): Promise<string> {
     try {
       const res = await axios.get(this.tokenUrl, {
@@ -130,15 +119,8 @@ export class InstagramIgLoginClient {
     }
   }
 
-  /**
-   * Pega IG Business/Creator:
-   * 1) /me/accounts (User token)
-   * 2) /{pageId}?fields=instagram_business_account (Page token)
-   * 3) /{igUserId}?fields=id,username (Page token)
-   */
   async getMe(userAccessToken: string): Promise<MeResponse> {
     try {
-      // 1) páginas do usuário
       const pagesRes = await this.http.get("/me/accounts", {
         params: {
           fields: "id,name,access_token",
@@ -154,7 +136,6 @@ export class InstagramIgLoginClient {
         );
       }
 
-      // 2) tenta achar uma página que realmente tenha instagram_business_account
       for (const p of pages) {
         if (!p?.id || !p.access_token) continue;
 
@@ -171,7 +152,6 @@ export class InstagramIgLoginClient {
         const igUserId = igLinkRes.data?.instagram_business_account?.id as string | undefined;
         if (!igUserId) continue;
 
-        // 3) dados do perfil IG (IGUser não tem account_type no Graph API)
         const igProfileRes = await this.http.get(`/${igUserId}`, {
           params: {
             fields: "id,username",
@@ -184,7 +164,7 @@ export class InstagramIgLoginClient {
         return {
           igUserId: data.id,
           username: data.username,
-          accountType: "IG_USER", // valor fixo pra manter compatibilidade
+          accountType: "IG_USER", 
           facebookPageId: pageId,
           pageAccessToken
         };

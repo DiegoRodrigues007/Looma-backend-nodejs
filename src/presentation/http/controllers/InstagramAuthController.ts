@@ -5,9 +5,9 @@ import { IInstagramIgLoginAuthService } from "../../../application/instagram/IIn
 import { CompleteIgLoginUseCase } from "../../../application/instagram/CompleteIgLoginUseCase";
 import { prisma } from "../../../infrastructure/db/prismaClient";
 
-// =====================================================
-// Helpers de data
-// =====================================================
+/* =========================
+   Helpers de data
+========================= */
 function ymd(d: Date) {
   return d.toISOString().slice(0, 10);
 }
@@ -42,9 +42,9 @@ function mapInsightByDay(insightsData: any[], metricName: string): Record<string
   return out;
 }
 
-// =====================================================
-// 🔐 Helpers de autenticação
-// =====================================================
+/* =========================
+   Auth helpers
+========================= */
 function getAuthenticatedUserId(req: Request): string | null {
   const anyReq = req as any;
 
@@ -64,9 +64,6 @@ function getAuthenticatedUserId(req: Request): string | null {
   return null;
 }
 
-// =====================================================
-// Cookie temporário para callback
-// =====================================================
 const IG_LOGIN_UID_COOKIE = "ig_login_uid";
 
 function setIgLoginCookie(res: Response, userId: string) {
@@ -89,9 +86,6 @@ function clearIgLoginCookie(res: Response) {
   res.clearCookie(IG_LOGIN_UID_COOKIE, { path: "/" });
 }
 
-// =====================================================
-// state assinado (fallback caso cookie falhe)
-// =====================================================
 const STATE_SIGN_SECRET =
   process.env.IG_STATE_SIGN_SECRET || process.env.JWT_SECRET || "dev_secret_change_me";
 
@@ -130,7 +124,6 @@ function safeParseState(state: string): { uid?: string; returnTo?: string } {
   }
 }
 
-// ✅ parse robusto para querystring
 function parseRedirectParam(v: unknown): boolean {
   if (v === undefined || v === null || v === "") return true;
 
@@ -146,9 +139,6 @@ function parseRedirectParam(v: unknown): boolean {
   return true;
 }
 
-/**
- * Extrai igUserId de retornos variados do UseCase
- */
 function extractIgUserId(result: any): string | null {
   const v =
     result?.instagramId ||
@@ -178,18 +168,155 @@ function isInstagramTokenInvalid(err: any): boolean {
   return false;
 }
 
-// =====================================================
-// Controller
-// =====================================================
+/**
+ * 🔥 Followers histórico diário no banco (se existir).
+ */
+async function getFollowersSeriesFromDb(opts: {
+  userId: string;
+  igUserId: string;
+  days: string[];
+  fallbackFollowers: number;
+}): Promise<{ followersByDay: Record<string, number>; hasHistory: boolean }> {
+  const { userId, igUserId, days, fallbackFollowers } = opts;
+
+  try {
+    const from = parseYmd(days[0]);
+    const to = parseYmd(days[days.length - 1]);
+
+    // @ts-ignore - o model pode não existir ainda
+    const rows = await prisma.instagramFollowersDaily.findMany({
+      where: {
+        userId,
+        igUserId,
+        day: { gte: from, lte: to },
+      },
+      orderBy: { day: "asc" },
+      select: { day: true, followers: true },
+    });
+
+    const map: Record<string, number> = {};
+    for (const r of rows) {
+      map[ymd(new Date(r.day))] = Number(r.followers ?? 0);
+    }
+
+    const hasHistory = rows.length > 0;
+
+    // carry-forward
+    let last = hasHistory ? map[days[0]] ?? fallbackFollowers : fallbackFollowers;
+    for (const day of days) {
+      if (map[day] == null) {
+        map[day] = last;
+      } else {
+        last = map[day];
+      }
+    }
+
+    return { followersByDay: map, hasHistory };
+  } catch {
+    const map: Record<string, number> = {};
+    for (const day of days) map[day] = fallbackFollowers;
+    return { followersByDay: map, hasHistory: false };
+  }
+}
+
+/**
+ * 🔥 Salva snapshot do dia atual no banco (se existir).
+ */
+async function saveTodayFollowersSnapshot(opts: { userId: string; igUserId: string; followers: number }) {
+  const { userId, igUserId, followers } = opts;
+
+  try {
+    const today = ymd(new Date());
+    const dayDate = parseYmd(today);
+
+    // @ts-ignore - o model pode não existir ainda
+    await prisma.instagramFollowersDaily.upsert({
+      where: {
+        userId_igUserId_day: { userId, igUserId, day: dayDate },
+      },
+      update: { followers },
+      create: { userId, igUserId, day: dayDate, followers },
+    });
+  } catch {
+    // ignora se não existir tabela/model
+  }
+}
+
+/* =====================================================
+   🔥 Top posts por engajamento (likes + comments)
+   - Busca /{igUserId}/media
+   - Filtra pelo range
+   - Ordena por engajamento
+===================================================== */
+async function fetchTopContent(opts: {
+  igUserId: string;
+  accessToken: string;
+  from: string;
+  to: string;
+  followersBase: number;
+  graph: ReturnType<typeof axios.create>;
+}) {
+  const { igUserId, accessToken, from, to, followersBase, graph } = opts;
+
+  const fromTs = parseYmd(from).getTime();
+  const toTs = parseYmd(to).getTime() + 86399999;
+
+  const mediaRes = await graph.get(`/${igUserId}/media`, {
+    params: {
+      fields:
+        "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count",
+      limit: 50,
+      access_token: accessToken,
+    },
+  });
+
+  const data = mediaRes.data?.data ?? [];
+  const denom = Math.max(1, Number(followersBase ?? 1));
+
+  const items = data
+    .filter((m: any) => {
+      const ts = new Date(m.timestamp).getTime();
+      return ts >= fromTs && ts <= toTs;
+    })
+    .map((m: any) => {
+      const likes = Number(m.like_count ?? 0);
+      const comments = Number(m.comments_count ?? 0);
+      const engagement = likes + comments;
+
+      // pra front: "IMAGE" | "VIDEO" | "CAROUSEL_ALBUM" (não muda)
+      const mediaType = String(m.media_type ?? "IMAGE");
+
+      // thumb: prioriza thumbnail_url (vídeo) e senão media_url
+      const thumb = m.thumbnail_url || m.media_url || null;
+
+      return {
+        id: String(m.id),
+        permalink: String(m.permalink ?? ""),
+        caption: m.caption ?? null,
+        thumb,
+        mediaType,
+        publishedAt: String(m.timestamp ?? ""),
+        engagementRate: (engagement / denom) * 100,
+        likes,
+        comments,
+        views: null as number | null,
+      };
+    })
+    .sort((a: any, b: any) => (b.likes + b.comments) - (a.likes + a.comments))
+    .slice(0, 6);
+
+  return items;
+}
+
+/* =========================
+   Controller
+========================= */
 export class InstagramAuthController {
   constructor(
     private readonly authService: IInstagramIgLoginAuthService,
     private readonly completeLogin: CompleteIgLoginUseCase
   ) {}
 
-  /**
-   * GET /api/instagram/start?redirect=false&state=/settings
-   */
   async start(req: Request, res: Response): Promise<void> {
     const userId = getAuthenticatedUserId(req);
     if (!userId) {
@@ -225,9 +352,6 @@ export class InstagramAuthController {
     res.redirect(302, url);
   }
 
-  /**
-   * GET /api/instagram/callback?code=...&state=...
-   */
   async callback(req: Request, res: Response): Promise<void> {
     const code = String(req.query.code ?? "");
     const state = String(req.query.state ?? "");
@@ -237,10 +361,8 @@ export class InstagramAuthController {
       return;
     }
 
-    // 1) cookie
     let userId = getIgLoginCookie(req);
 
-    // 2) fallback state assinado
     let returnTo = "/settings";
     if (state) {
       const parsed = safeParseState(state);
@@ -265,20 +387,16 @@ export class InstagramAuthController {
     });
 
     try {
-      // ✅ Aqui o use-case deve salvar tokens via TokenStore
       const result: any = await this.completeLogin.execute(code, state ?? "", userId);
 
       const igUserId = extractIgUserId(result);
 
-      // ✅ GARANTE que o registro ficou vinculado ao userId e marca como conectado
-      // Se o TokenStore já gravou tudo, isso só reforça.
       if (igUserId) {
         await prisma.instagramAccount.updateMany({
           where: { instagramId: igUserId },
           data: { userId, isConnected: true },
         });
       } else {
-        // fallback: marca o mais recente do userId
         const latest = await prisma.instagramAccount.findFirst({
           where: { userId },
           orderBy: { updatedAt: "desc" },
@@ -303,21 +421,13 @@ export class InstagramAuthController {
     }
 
     const frontUrl = process.env.FRONTEND_URL ?? "http://localhost:5173";
-    const redirectUrl = `${frontUrl}${returnTo}${
-      returnTo.includes("?") ? "&" : "?"
-    }instagram=connected`;
+    const redirectUrl = `${frontUrl}${returnTo}${returnTo.includes("?") ? "&" : "?"}instagram=connected`;
 
     reminderLogSafe("[IG] redirect -> front", { redirectUrl });
 
     res.redirect(302, redirectUrl);
   }
 
-  /**
-   * GET /api/instagram/status
-   *
-   * ✅ Endpoint de UI: confia no banco.
-   * Não chama Graph (evita “oscilar” por timeout/rate-limit).
-   */
   async status(req: Request, res: Response): Promise<void> {
     const userId = getAuthenticatedUserId(req);
     if (!userId) {
@@ -351,9 +461,6 @@ export class InstagramAuthController {
     });
   }
 
-  /**
-   * POST /api/instagram/disconnect
-   */
   async disconnect(req: Request, res: Response): Promise<void> {
     const userId = getAuthenticatedUserId(req);
     if (!userId) {
@@ -378,12 +485,6 @@ export class InstagramAuthController {
     res.status(204).send();
   }
 
-  /**
-   * GET /api/instagram/metrics?from=YYYY-MM-DD&to=YYYY-MM-DD
-   *
-   * ✅ Aqui valida token de verdade.
-   * Se token inválido => marca desconectado e retorna 409.
-   */
   async metrics(req: Request, res: Response): Promise<void> {
     const userId = getAuthenticatedUserId(req);
     if (!userId) {
@@ -419,6 +520,9 @@ export class InstagramAuthController {
     const graph = axios.create({ baseURL: graphBaseUrl, timeout: 15000 });
 
     try {
+      // =====================================================
+      // Perfil (followers atual)
+      // =====================================================
       const profileRes = await graph.get(`/${igUserId}`, {
         params: {
           fields: "followers_count,username",
@@ -426,9 +530,15 @@ export class InstagramAuthController {
         },
       });
 
-      const followers = Number(profileRes.data?.followers_count ?? 0);
+      const currentFollowers = Number(profileRes.data?.followers_count ?? 0);
       const username = String(profileRes.data?.username ?? row.instagramUserName ?? "");
 
+      // ✅ salva snapshot do dia atual (se a tabela existir)
+      await saveTodayFollowersSnapshot({ userId, igUserId, followers: currentFollowers });
+
+      // =====================================================
+      // Insights (por dia)
+      // =====================================================
       const reachRes = await graph.get(`/${igUserId}/insights`, {
         params: {
           metric: "reach",
@@ -459,11 +569,24 @@ export class InstagramAuthController {
 
       const days = listDays(from, to);
 
+      // ✅ followers por dia (vindo do banco; se não tiver, fallback)
+      const { followersByDay, hasHistory } = await getFollowersSeriesFromDb({
+        userId,
+        igUserId,
+        days,
+        fallbackFollowers: currentFollowers,
+      });
+
+      // =====================================================
+      // Timeseries final (followers + reach + interactions)
+      // =====================================================
       const timeseries = days.map((day) => {
         const reach = reachByDay[day] ?? 0;
         const profileViews = profileViewsByDay[day] ?? 0;
         const totalInteractions = totalInteractionsByDay[day] ?? 0;
         const engagementRate = reach > 0 ? (totalInteractions / reach) * 100 : 0;
+
+        const followers = followersByDay[day] ?? currentFollowers;
 
         return { date: day, followers, reach, profileViews, totalInteractions, engagementRate };
       });
@@ -475,11 +598,40 @@ export class InstagramAuthController {
           ? timeseries.reduce((acc, t) => acc + t.engagementRate, 0) / timeseries.length
           : 0;
 
+      const followersKpi = timeseries[timeseries.length - 1]?.followers ?? currentFollowers;
+
+      // =====================================================
+      // 🔥 TOP POSTS (mais engajados no período)
+      // =====================================================
+      let topContent: any[] = [];
+      try {
+        topContent = await fetchTopContent({
+          igUserId,
+          accessToken,
+          from,
+          to,
+          followersBase: currentFollowers,
+          graph,
+        });
+      } catch (e: any) {
+        console.warn("[IG] topContent warning:", e?.response?.data ?? e?.message ?? e);
+        topContent = [];
+      }
+
       res.json({
         filters: { from, to, granularity: "day", providers: ["instagram"] },
-        kpis: { followers, reach: totalReach, totalInteractions, engagementRate: avgEngagementRate },
+        kpis: {
+          followers: followersKpi,
+          reach: totalReach,
+          totalInteractions,
+          engagementRate: avgEngagementRate,
+        },
         timeseries,
+        topContent,
         account: { igUserId, username },
+        meta: {
+          followersHistorySource: hasHistory ? "db" : "fallback",
+        },
       });
     } catch (err: any) {
       console.error("[IG] metrics error:", err?.response?.data ?? err);
@@ -509,7 +661,6 @@ export class InstagramAuthController {
   }
 }
 
-// evita log gigante com token/url inteira no console
 function reminderLogSafe(message: string, obj: any) {
   try {
     console.log(message, obj);

@@ -16,7 +16,11 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
+  // ==========================
+  // Relations
+  // ==========================
   instagramAccounts InstagramAccount[]
+  youtubeAccounts   YouTubeAccount[]
 
   @@map("User")
 }
@@ -33,18 +37,57 @@ model InstagramAccount {
   accessTokenExpiresAt DateTime?
   grantedScopes        String?
 
-  // ✅ NOVO: usado pelo TokenStore
+  // Usado para controle de renovação
   lastRefreshedAt DateTime?
 
-  // ✅ flag de vínculo (conectado/desconectado)
+  // Flag de vínculo ativo
   isConnected Boolean @default(false)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // ==========================
+  // Relation
+  // ==========================
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@map("InstagramAccounts")
+}
+
+model YouTubeAccount {
+  id String @id @default(uuid())
+
+  // ==========================
+  // Canal
+  // ==========================
+  channelId     String  @unique
+  channelTitle  String?
+  channelHandle String?
+
+  // ==========================
+  // Tokens OAuth
+  // ==========================
+  accessToken   String?
+  refreshToken  String?
+  expiresAt     DateTime?
+  grantedScopes String?
+
+  lastRefreshedAt DateTime?
+
+  // Flag de vínculo ativo
+  isConnected Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ==========================
+  // Relation
+  // ==========================
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("YouTubeAccounts")
 }

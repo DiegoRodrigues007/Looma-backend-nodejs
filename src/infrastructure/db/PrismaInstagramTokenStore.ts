@@ -16,7 +16,6 @@ export class PrismaInstagramTokenStore implements IInstagramTokenStore {
       orderBy: { updatedAt: "desc" },
     });
 
-    // ✅ precisa ter instagramId e pelo menos 1 token
     if (!row?.instagramId || (!row.accessToken && !row.pageAccessToken)) return null;
 
     return {
@@ -26,7 +25,7 @@ export class PrismaInstagramTokenStore implements IInstagramTokenStore {
       pageAccessToken: row.pageAccessToken ?? null,
       facebookPageId: row.facebookPageId ?? null,
       username: row.instagramUserName ?? null,
-      accountType: null, // não existe no schema atual
+      accountType: null, 
       expiresAt: row.accessTokenExpiresAt ?? null,
       lastRefreshedAt: row.lastRefreshedAt ?? null,
     };
@@ -50,15 +49,6 @@ export class PrismaInstagramTokenStore implements IInstagramTokenStore {
       throw new Error("accessToken ou pageAccessToken é obrigatório para salvar token do Instagram");
     }
 
-    /**
-     * ✅ Ponto CRÍTICO:
-     * - No seu schema, instagramId normalmente é UNIQUE.
-     * - Então o upsert DEVE ser pelo instagramId.
-     *
-     * ✅ Também garantimos:
-     * - Nunca gravar string vazia (""), pra não “parecer token” quando não tem.
-     * - Só atualiza accessToken se vier definido (pra não apagar token existente por acidente).
-     */
     await prisma.instagramAccount.upsert({
       where: { instagramId: igUserId },
       update: {
@@ -66,12 +56,10 @@ export class PrismaInstagramTokenStore implements IInstagramTokenStore {
 
         instagramUserName: username ?? null,
 
-        // só atualiza accessToken se veio no input
         ...(typeof accessToken === "string" && accessToken.trim().length > 0
           ? { accessToken: accessToken.trim() }
           : {}),
 
-        // pageAccessToken pode ser null (tudo bem)
         pageAccessToken:
           typeof pageAccessToken === "string" && pageAccessToken.trim().length > 0
             ? pageAccessToken.trim()
@@ -86,11 +74,10 @@ export class PrismaInstagramTokenStore implements IInstagramTokenStore {
         instagramId: igUserId,
         instagramUserName: username ?? null,
 
-        // no create, precisa gravar algo consistente
         accessToken:
           typeof accessToken === "string" && accessToken.trim().length > 0
             ? accessToken.trim()
-            : null, // ✅ melhor que ""
+            : null,
 
         pageAccessToken:
           typeof pageAccessToken === "string" && pageAccessToken.trim().length > 0

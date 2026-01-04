@@ -1,6 +1,3 @@
-// src/presentation/http/server.ts
-
-// ✅ precisa ser a PRIMEIRA coisa do processo
 import "dotenv/config";
 
 import { env } from "../../infrastructure/config/env";
