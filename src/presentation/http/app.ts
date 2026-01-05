@@ -1,5 +1,6 @@
-import express from "express";
+import express, { NextFunction, Request, Response } from "express";
 import cookieParser from "cookie-parser";
+import axios from "axios";
 
 import { corsMiddleware } from "../../infrastructure/config/cors";
 import { setupSwagger } from "./docs/swagger";
@@ -10,26 +11,17 @@ import { youtubeRouter } from "./routes/youtube.routes";
 
 export const app = express();
 
-// ==========================
-// Middlewares
-// ==========================
 app.use(corsMiddleware);
 
-// Preflight OPTIONS
-app.use((req, res, next) => {
-  if (req.method === "OPTIONS") {
-    corsMiddleware(req, res, () => res.sendStatus(204));
-    return;
-  }
-  next();
+app.options(/.*/, (_req, res) => {
+  return res.sendStatus(204);
 });
 
-app.use(express.json());
+
+app.use(express.json({ limit: "2mb" }));
 app.use(cookieParser());
 
-// ==========================
-// Health / Root
-// ==========================
+
 app.get("/", (_req, res) => {
   res.redirect("/swagger");
 });
@@ -38,24 +30,48 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
 });
 
-// ==========================
-// Routes
-// ==========================
 app.use("/api/auth", authRouter);
 app.use("/api/instagram", instagramRouter);
 app.use("/api/youtube", youtubeRouter);
 
-// ==========================
-// Swagger (depois das rotas)
-// ==========================
+
 setupSwagger(app);
 
-// ==========================
-// 404
-// ==========================
 app.use((req, res) => {
   res.status(404).json({
     message: "Rota não encontrada",
+    code: "NOT_FOUND",
     path: req.originalUrl,
+  });
+});
+
+app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
+  const status = Number(err?.statusCode || err?.status || 500);
+
+  const isAxios = axios.isAxiosError(err);
+  const axiosStatus = isAxios ? err.response?.status : undefined;
+  const axiosData = isAxios ? err.response?.data : undefined;
+
+  console.error("[API ERROR]", {
+    status,
+    method: req.method,
+    path: req.originalUrl,
+    message: err?.message,
+    code: err?.code,
+    axiosStatus,
+  });
+
+  return res.status(status).json({
+    message: err?.publicMessage || err?.message || "Erro interno no servidor",
+    code: err?.code || "INTERNAL_ERROR",
+    path: req.originalUrl,
+    details:
+      err?.details ??
+      (isAxios
+        ? {
+            providerStatus: axiosStatus,
+            providerData: axiosData,
+          }
+        : undefined),
   });
 });

@@ -115,6 +115,7 @@ youtubeRouter.get("/status", authMiddleware, async (req, res) => {
  *         description: Não autenticado
  */
 youtubeRouter.post("/disconnect", authMiddleware, async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
   await controller.disconnect(req, res);
   if (!res.headersSent) return res.status(204).send();
 });
@@ -154,6 +155,54 @@ youtubeRouter.post("/disconnect", authMiddleware, async (req, res) => {
 youtubeRouter.get("/metrics", authMiddleware, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   await controller.metrics(req, res);
+});
+
+/**
+ * @openapi
+ * /api/youtube/top-content:
+ *   get:
+ *     tags:
+ *       - YouTube
+ *     summary: Retorna os Top Conteúdos (vídeos) do canal no período
+ *     description: Usa YouTube Analytics API para rankear vídeos no período e YouTube Data API para retornar título/thumbnail.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: from
+ *         required: true
+ *         schema:
+ *           type: string
+ *           example: "2025-12-01"
+ *       - in: query
+ *         name: to
+ *         required: true
+ *         schema:
+ *           type: string
+ *           example: "2025-12-31"
+ *       - in: query
+ *         name: limit
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 10
+ *           minimum: 1
+ *           maximum: 25
+ *     responses:
+ *       200:
+ *         description: Lista de vídeos mais performáticos no período
+ *       400:
+ *         description: Parâmetros inválidos
+ *       401:
+ *         description: Não autenticado
+ *       409:
+ *         description: YouTube não conectado ou token inválido/expirado (reconectar)
+ *       502:
+ *         description: Falha ao consultar APIs do Google/YouTube
+ */
+youtubeRouter.get("/top-content", authMiddleware, async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  await controller.topContent(req, res);
 });
 
 export default youtubeRouter;
