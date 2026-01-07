@@ -1,0 +1,147 @@
+import { Router } from "express";
+import { MetricsController } from "../controllers/MetricsController";
+
+const router = Router();
+const controller = new MetricsController();
+
+/**
+ * @swagger
+ * tags:
+ *   - name: Metrics
+ *     description: Métricas comparativas e histórico (Instagram, YouTube, etc.)
+ */
+
+/**
+ * @swagger
+ * /api/metrics/instagram/snapshot/ensure:
+ *   post:
+ *     summary: Garante snapshot diário do Instagram (modo híbrido)
+ *     description: >
+ *       Cria o snapshot do dia (1 por usuário) caso ainda não exista.
+ *       Recomendado chamar ao abrir o dashboard para evitar métricas zeradas.
+ *     tags:
+ *       - Metrics
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Resultado da operação
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 saved:
+ *                   type: boolean
+ *                   example: true
+ *       400:
+ *         description: Conta Instagram não conectada ou credenciais ausentes
+ *       401:
+ *         description: Usuário não autenticado
+ *       500:
+ *         description: Falha ao garantir snapshot do dia
+ */
+router.post(
+  "/instagram/snapshot/ensure",
+  controller.instagramEnsureSnapshot.bind(controller)
+);
+
+/**
+ * @swagger
+ * /api/metrics/instagram/overview:
+ *   get:
+ *     summary: Retorna métricas comparativas do Instagram (último vs anterior)
+ *     description: >
+ *       Retorna métricas do Instagram com comparação automática entre
+ *       o snapshot mais recente e o snapshot imediatamente anterior,
+ *       incluindo tendência (↑ ↓ =) e variação.
+ *     tags:
+ *       - Metrics
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Métricas comparativas retornadas com sucesso
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 followers:
+ *                   type: object
+ *                   example:
+ *                     label: Seguidores
+ *                     current: 120
+ *                     previous: 115
+ *                     delta: 5
+ *                     deltaPercent: 4.3
+ *                     trend: up
+ *                     deltaLabel: "▲ +5 (4.3%)"
+ *                 engagement:
+ *                   type: object
+ *                   example:
+ *                     label: Engajamento
+ *                     current: 3.2
+ *                     previous: 4.0
+ *                     delta: -0.8
+ *                     trend: down
+ *                     deltaLabel: "▼ -0.80pp"
+ *       204:
+ *         description: Histórico insuficiente para gerar comparação
+ *       401:
+ *         description: Usuário não autenticado
+ */
+router.get(
+  "/instagram/overview",
+  controller.instagramOverview.bind(controller)
+);
+
+/**
+ * @swagger
+ * /api/metrics/instagram/period:
+ *   get:
+ *     summary: Retorna métricas comparativas do Instagram por período
+ *     description: >
+ *       Compara métricas médias do período atual com o período anterior
+ *       (exemplo: últimos 7 dias vs 7 dias anteriores).
+ *     tags:
+ *       - Metrics
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: days
+ *         required: false
+ *         schema:
+ *           type: number
+ *           example: 7
+ *         description: Quantidade de dias do período de comparação
+ *     responses:
+ *       200:
+ *         description: Métricas comparativas por período
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 reach:
+ *                   type: object
+ *                   example:
+ *                     label: Alcance
+ *                     current: 8200
+ *                     previous: 7600
+ *                     delta: 600
+ *                     deltaPercent: 7.8
+ *                     trend: up
+ *                     deltaLabel: "▲ +600 (7.8%)"
+ *       204:
+ *         description: Histórico insuficiente para o período solicitado
+ *       401:
+ *         description: Usuário não autenticado
+ */
+router.get(
+  "/instagram/period",
+  controller.instagramPeriod.bind(controller)
+);
+
+export default router;

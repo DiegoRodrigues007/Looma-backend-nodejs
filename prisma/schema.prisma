@@ -7,6 +7,17 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+//
+// ==========================
+// ✅ ENUMS
+// ==========================
+// Evita plataforma errada e facilita filtros/queries
+//
+enum MetricsPlatform {
+  instagram
+  youtube
+}
+
 model User {
   id           String   @id @default(uuid())
   email        String   @unique
@@ -21,6 +32,9 @@ model User {
   // ==========================
   instagramAccounts InstagramAccount[]
   youtubeAccounts   YouTubeAccount[]
+
+  // ✅ histórico de métricas
+  metricsSnapshots  MetricsSnapshot[]
 
   @@map("User")
 }
@@ -37,7 +51,7 @@ model InstagramAccount {
   accessTokenExpiresAt DateTime?
   grantedScopes        String?
 
-  // Usado para controle de renovação
+  // Controle de renovação
   lastRefreshedAt DateTime?
 
   // Flag de vínculo ativo
@@ -90,4 +104,39 @@ model YouTubeAccount {
 
   @@index([userId])
   @@map("YouTubeAccounts")
+}
+
+//
+// ==========================
+// 📊 MÉTRICAS HISTÓRICAS
+// ==========================
+// 1 snapshot por usuário / plataforma / dia
+//
+// ✅ Ajuste-chave pro híbrido:
+// - salvar "date" como DATE (sem hora) pra não quebrar por timezone
+//
+model MetricsSnapshot {
+  id       String          @id @default(uuid())
+  userId   String
+  platform MetricsPlatform
+
+  // ✅ só a data (YYYY-MM-DD) no Postgres
+  date     DateTime        @db.Date
+
+  followers         Int    @default(0)
+  reach             Int    @default(0)
+  totalInteractions Int    @default(0)
+  engagementRate    Float  @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ==========================
+  // Relation
+  // ==========================
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, platform, date], name: "userId_platform_date")
+  @@index([userId, platform, date])
+  @@map("MetricsSnapshots")
 }

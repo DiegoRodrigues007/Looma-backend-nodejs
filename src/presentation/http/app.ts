@@ -8,6 +8,11 @@ import { setupSwagger } from "./docs/swagger";
 import { authRouter } from "./routes/auth.routes";
 import { instagramRouter } from "./routes/instagram.routes";
 import { youtubeRouter } from "./routes/youtube.routes";
+import metricsRoutes from "./routes/metrics.routes";
+
+// ✅ IMPORTANTE: use o MESMO middleware que já protege rotas no seu projeto
+// Ex.: "./middlewares/auth.middleware" | "./middlewares/ensureAuth" | etc.
+import { authMiddleware } from "./middlewares/authMiddleware";
 
 export const app = express();
 
@@ -17,10 +22,8 @@ app.options(/.*/, (_req, res) => {
   return res.sendStatus(204);
 });
 
-
 app.use(express.json({ limit: "2mb" }));
 app.use(cookieParser());
-
 
 app.get("/", (_req, res) => {
   res.redirect("/swagger");
@@ -34,6 +37,7 @@ app.use("/api/auth", authRouter);
 app.use("/api/instagram", instagramRouter);
 app.use("/api/youtube", youtubeRouter);
 
+app.use("/api/metrics", authMiddleware, metricsRoutes);
 
 setupSwagger(app);
 

@@ -27,6 +27,25 @@ function listDays(from: string, to: string): string[] {
   return days;
 }
 
+/* =========================
+   Helpers de parsing (Graph)
+========================= */
+function toFiniteNumber(v: any): number {
+  // O Graph pode devolver:
+  // - number / string
+  // - { value: number }
+  // - em alguns casos, algo mais aninhado
+  const raw =
+    v == null
+      ? 0
+      : typeof v === "object"
+      ? (v as any).value ?? (v as any).values?.[0]?.value ?? v
+      : v;
+
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : 0;
+}
+
 function mapInsightByDay(insightsData: any[], metricName: string): Record<string, number> {
   const item = insightsData?.find((x: any) => x?.name === metricName);
   const values = item?.values ?? [];
@@ -35,8 +54,9 @@ function mapInsightByDay(insightsData: any[], metricName: string): Record<string
   for (const v of values) {
     const endTime: string | undefined = v?.end_time;
     if (!endTime) continue;
+
     const day = endTime.slice(0, 10);
-    out[day] = Number(v?.value ?? 0);
+    out[day] = toFiniteNumber(v?.value);
   }
 
   return out;
@@ -196,7 +216,7 @@ async function getFollowersSeriesFromDb(opts: {
 
     const map: Record<string, number> = {};
     for (const r of rows) {
-      map[ymd(new Date(r.day))] = Number(r.followers ?? 0);
+      map[ymd(new Date(r.day))] = toFiniteNumber(r.followers);
     }
 
     const hasHistory = rows.length > 0;
@@ -244,9 +264,6 @@ async function saveTodayFollowersSnapshot(opts: { userId: string; igUserId: stri
 
 /* =====================================================
    🔥 Top posts por engajamento (likes + comments)
-   - Busca /{igUserId}/media
-   - Filtra pelo range
-   - Ordena por engajamento
 ===================================================== */
 async function fetchTopContent(opts: {
   igUserId: string;
@@ -271,7 +288,7 @@ async function fetchTopContent(opts: {
   });
 
   const data = mediaRes.data?.data ?? [];
-  const denom = Math.max(1, Number(followersBase ?? 1));
+  const denom = Math.max(1, toFiniteNumber(followersBase));
 
   const items = data
     .filter((m: any) => {
@@ -279,14 +296,11 @@ async function fetchTopContent(opts: {
       return ts >= fromTs && ts <= toTs;
     })
     .map((m: any) => {
-      const likes = Number(m.like_count ?? 0);
-      const comments = Number(m.comments_count ?? 0);
+      const likes = toFiniteNumber(m.like_count);
+      const comments = toFiniteNumber(m.comments_count);
       const engagement = likes + comments;
 
-      // pra front: "IMAGE" | "VIDEO" | "CAROUSEL_ALBUM" (não muda)
       const mediaType = String(m.media_type ?? "IMAGE");
-
-      // thumb: prioriza thumbnail_url (vídeo) e senão media_url
       const thumb = m.thumbnail_url || m.media_url || null;
 
       return {
@@ -530,7 +544,7 @@ export class InstagramAuthController {
         },
       });
 
-      const currentFollowers = Number(profileRes.data?.followers_count ?? 0);
+      const currentFollowers = toFiniteNumber(profileRes.data?.followers_count);
       const username = String(profileRes.data?.username ?? row.instagramUserName ?? "");
 
       // ✅ salva snapshot do dia atual (se a tabela existir)
@@ -584,6 +598,8 @@ export class InstagramAuthController {
         const reach = reachByDay[day] ?? 0;
         const profileViews = profileViewsByDay[day] ?? 0;
         const totalInteractions = totalInteractionsByDay[day] ?? 0;
+
+        // sua regra atual: interactions ÷ reach (%)
         const engagementRate = reach > 0 ? (totalInteractions / reach) * 100 : 0;
 
         const followers = followersByDay[day] ?? currentFollowers;
@@ -591,11 +607,11 @@ export class InstagramAuthController {
         return { date: day, followers, reach, profileViews, totalInteractions, engagementRate };
       });
 
-      const totalReach = timeseries.reduce((acc, t) => acc + t.reach, 0);
-      const totalInteractions = timeseries.reduce((acc, t) => acc + t.totalInteractions, 0);
+      const totalReach = timeseries.reduce((acc, t) => acc + (t.reach ?? 0), 0);
+      const totalInteractions = timeseries.reduce((acc, t) => acc + (t.totalInteractions ?? 0), 0);
       const avgEngagementRate =
         timeseries.length > 0
-          ? timeseries.reduce((acc, t) => acc + t.engagementRate, 0) / timeseries.length
+          ? timeseries.reduce((acc, t) => acc + (t.engagementRate ?? 0), 0) / timeseries.length
           : 0;
 
       const followersKpi = timeseries[timeseries.length - 1]?.followers ?? currentFollowers;
