@@ -5,9 +5,6 @@ import { IInstagramIgLoginAuthService } from "../../../application/instagram/IIn
 import { CompleteIgLoginUseCase } from "../../../application/instagram/CompleteIgLoginUseCase";
 import { prisma } from "../../../infrastructure/db/prismaClient";
 
-/* =========================
-   Helpers de data
-========================= */
 function ymd(d: Date) {
   return d.toISOString().slice(0, 10);
 }
@@ -27,14 +24,8 @@ function listDays(from: string, to: string): string[] {
   return days;
 }
 
-/* =========================
-   Helpers de parsing (Graph)
-========================= */
 function toFiniteNumber(v: any): number {
-  // O Graph pode devolver:
-  // - number / string
-  // - { value: number }
-  // - em alguns casos, algo mais aninhado
+
   const raw =
     v == null
       ? 0
@@ -62,9 +53,6 @@ function mapInsightByDay(insightsData: any[], metricName: string): Record<string
   return out;
 }
 
-/* =========================
-   Auth helpers
-========================= */
 function getAuthenticatedUserId(req: Request): string | null {
   const anyReq = req as any;
 
@@ -188,9 +176,6 @@ function isInstagramTokenInvalid(err: any): boolean {
   return false;
 }
 
-/**
- * 🔥 Followers histórico diário no banco (se existir).
- */
 async function getFollowersSeriesFromDb(opts: {
   userId: string;
   igUserId: string;
@@ -221,7 +206,6 @@ async function getFollowersSeriesFromDb(opts: {
 
     const hasHistory = rows.length > 0;
 
-    // carry-forward
     let last = hasHistory ? map[days[0]] ?? fallbackFollowers : fallbackFollowers;
     for (const day of days) {
       if (map[day] == null) {
@@ -239,9 +223,7 @@ async function getFollowersSeriesFromDb(opts: {
   }
 }
 
-/**
- * 🔥 Salva snapshot do dia atual no banco (se existir).
- */
+
 async function saveTodayFollowersSnapshot(opts: { userId: string; igUserId: string; followers: number }) {
   const { userId, igUserId, followers } = opts;
 
@@ -258,13 +240,9 @@ async function saveTodayFollowersSnapshot(opts: { userId: string; igUserId: stri
       create: { userId, igUserId, day: dayDate, followers },
     });
   } catch {
-    // ignora se não existir tabela/model
   }
 }
 
-/* =====================================================
-   🔥 Top posts por engajamento (likes + comments)
-===================================================== */
 async function fetchTopContent(opts: {
   igUserId: string;
   accessToken: string;
@@ -313,18 +291,72 @@ async function fetchTopContent(opts: {
         engagementRate: (engagement / denom) * 100,
         likes,
         comments,
+
         views: null as number | null,
+
+        insights: null as
+          | null
+          | {
+              plays?: number | null;
+              videoViews?: number | null;
+              reach?: number | null;
+              totalInteractions?: number | null;
+              shares?: number | null;
+              saved?: number | null;
+            },
       };
     })
-    .sort((a: any, b: any) => (b.likes + b.comments) - (a.likes + a.comments))
+    .sort((a: any, b: any) => b.likes + b.comments - (a.likes + a.comments))
     .slice(0, 6);
 
-  return items;
+  const enriched = await Promise.all(
+    items.map(async (it: any) => {
+      try {
+        const insightsRes = await graph.get(`/${it.id}/insights`, {
+          params: {
+            metric: "plays,video_views,reach,total_interactions,shares,saved",
+            access_token: accessToken,
+          },
+        });
+
+        const arr = insightsRes.data?.data ?? [];
+
+        const pickValue = (row: any): number | null => {
+          const v = row?.values?.[0]?.value ?? row?.total_value?.value ?? row?.value ?? null;
+          const n = Number(v);
+          return Number.isFinite(n) ? n : null;
+        };
+
+        const map: Record<string, number | null> = {};
+        for (const r of arr) {
+          const name = String(r?.name ?? "");
+          map[name] = pickValue(r);
+        }
+
+        const plays = map.plays ?? null;
+        const videoViews = map.video_views ?? null;
+
+        return {
+          ...it,
+          views: plays ?? videoViews ?? null,
+          insights: {
+            plays,
+            videoViews,
+            reach: map.reach ?? null,
+            totalInteractions: map.total_interactions ?? null,
+            shares: map.shares ?? null,
+            saved: map.saved ?? null,
+          },
+        };
+      } catch {
+        return it;
+      }
+    })
+  );
+
+  return enriched;
 }
 
-/* =========================
-   Controller
-========================= */
 export class InstagramAuthController {
   constructor(
     private readonly authService: IInstagramIgLoginAuthService,
@@ -534,9 +566,6 @@ export class InstagramAuthController {
     const graph = axios.create({ baseURL: graphBaseUrl, timeout: 15000 });
 
     try {
-      // =====================================================
-      // Perfil (followers atual)
-      // =====================================================
       const profileRes = await graph.get(`/${igUserId}`, {
         params: {
           fields: "followers_count,username",
@@ -547,12 +576,9 @@ export class InstagramAuthController {
       const currentFollowers = toFiniteNumber(profileRes.data?.followers_count);
       const username = String(profileRes.data?.username ?? row.instagramUserName ?? "");
 
-      // ✅ salva snapshot do dia atual (se a tabela existir)
       await saveTodayFollowersSnapshot({ userId, igUserId, followers: currentFollowers });
 
-      // =====================================================
-      // Insights (por dia)
-      // =====================================================
+
       const reachRes = await graph.get(`/${igUserId}/insights`, {
         params: {
           metric: "reach",
@@ -583,7 +609,6 @@ export class InstagramAuthController {
 
       const days = listDays(from, to);
 
-      // ✅ followers por dia (vindo do banco; se não tiver, fallback)
       const { followersByDay, hasHistory } = await getFollowersSeriesFromDb({
         userId,
         igUserId,
@@ -591,15 +616,11 @@ export class InstagramAuthController {
         fallbackFollowers: currentFollowers,
       });
 
-      // =====================================================
-      // Timeseries final (followers + reach + interactions)
-      // =====================================================
       const timeseries = days.map((day) => {
         const reach = reachByDay[day] ?? 0;
         const profileViews = profileViewsByDay[day] ?? 0;
         const totalInteractions = totalInteractionsByDay[day] ?? 0;
 
-        // sua regra atual: interactions ÷ reach (%)
         const engagementRate = reach > 0 ? (totalInteractions / reach) * 100 : 0;
 
         const followers = followersByDay[day] ?? currentFollowers;
@@ -616,9 +637,6 @@ export class InstagramAuthController {
 
       const followersKpi = timeseries[timeseries.length - 1]?.followers ?? currentFollowers;
 
-      // =====================================================
-      // 🔥 TOP POSTS (mais engajados no período)
-      // =====================================================
       let topContent: any[] = [];
       try {
         topContent = await fetchTopContent({
