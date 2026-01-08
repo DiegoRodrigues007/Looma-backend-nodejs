@@ -46,6 +46,8 @@ authRouter.post("/register", (req, res) => controller.register(req, res));
  *     tags:
  *       - Auth
  *     summary: Faz login do usuário
+ *     description: |
+ *       Retorna accessToken e seta um cookie httpOnly `refresh_token` para renovar a sessão sem deslogar.
  *     requestBody:
  *       required: true
  *       content:
@@ -83,3 +85,36 @@ authRouter.post("/login", (req, res) => controller.login(req, res));
  *         description: Não autenticado
  */
 authRouter.get("/me", authMiddleware, (req, res) => controller.me(req, res));
+
+/**
+ * @openapi
+ * /api/auth/refresh:
+ *   post:
+ *     tags:
+ *       - Auth
+ *     summary: Renova o access token usando refresh token via cookie
+ *     description: |
+ *       Usa o cookie httpOnly `refresh_token` para gerar um novo accessToken sem deslogar.
+ *       Não requer Bearer token.
+ *     responses:
+ *       200:
+ *         description: Novo accessToken retornado com sucesso
+ *       401:
+ *         description: Refresh token ausente, inválido ou expirado
+ */
+authRouter.post("/refresh", (req, res) => controller.refresh(req, res));
+
+/**
+ * @openapi
+ * /api/auth/logout:
+ *   post:
+ *     tags:
+ *       - Auth
+ *     summary: Logout do usuário
+ *     description: |
+ *       Revoga o refresh token atual (se existir) e limpa o cookie `refresh_token`.
+ *     responses:
+ *       200:
+ *         description: Logout realizado com sucesso
+ */
+authRouter.post("/logout", (req, res) => controller.logout(req, res));

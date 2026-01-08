@@ -34,9 +34,42 @@ model User {
   youtubeAccounts   YouTubeAccount[]
 
   // ✅ histórico de métricas
-  metricsSnapshots  MetricsSnapshot[]
+  metricsSnapshots MetricsSnapshot[]
+
+  // ✅ refresh tokens (sessão do app)
+  refreshTokens RefreshToken[]
 
   @@map("User")
+}
+
+//
+// ==========================
+// 🔐 REFRESH TOKENS (APP AUTH)
+// ==========================
+// Guarda refresh token do LOGIN do Looma (não confundir com YouTube refreshToken)
+// ✅ Armazena hash do token (segurança)
+// ✅ Permite revogar (logout/rotacionar)
+//
+model RefreshToken {
+  id     String @id @default(uuid())
+  userId String
+
+  // ✅ armazene SOMENTE o hash (sha256 por exemplo)
+  tokenHash String @unique
+
+  expiresAt DateTime
+  revokedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  // ==========================
+  // Relation
+  // ==========================
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("RefreshTokens")
 }
 
 model InstagramAccount {
@@ -81,7 +114,7 @@ model YouTubeAccount {
   channelHandle String?
 
   // ==========================
-  // Tokens OAuth
+  // Tokens OAuth (YouTube)
   // ==========================
   accessToken   String?
   refreshToken  String?
@@ -121,12 +154,12 @@ model MetricsSnapshot {
   platform MetricsPlatform
 
   // ✅ só a data (YYYY-MM-DD) no Postgres
-  date     DateTime        @db.Date
+  date DateTime @db.Date
 
-  followers         Int    @default(0)
-  reach             Int    @default(0)
-  totalInteractions Int    @default(0)
-  engagementRate    Float  @default(0)
+  followers         Int   @default(0)
+  reach             Int   @default(0)
+  totalInteractions Int   @default(0)
+  engagementRate    Float @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
