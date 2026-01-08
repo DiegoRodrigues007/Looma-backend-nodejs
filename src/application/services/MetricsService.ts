@@ -2,20 +2,14 @@ import { compareKpi } from "./KpiComparator";
 import { compareEngagement } from "./EngagementComparator";
 import { KpiComparativeDTO } from "../dto/metrics/KpiComparativeDTO";
 
-/**
- * Input esperado do MetricsService
- * (normalmente vem de APIs externas ou banco)
- */
+
 export interface MetricsSnapshot {
   followers: number;
   reach: number;
   totalInteractions: number;
-  engagementRate: number; // ex: 0.032 = 3.2%
+  engagementRate: number; 
 }
 
-/**
- * Output FINAL que o frontend consome
- */
 export interface MetricsOverview {
   followers: KpiComparativeDTO;
   reach: KpiComparativeDTO;
@@ -24,36 +18,40 @@ export interface MetricsOverview {
 }
 
 export class MetricsService {
-  /**
-   * Gera visão comparativa completa
-   */
-  static buildOverview(
-    current: MetricsSnapshot,
-    previous: MetricsSnapshot
-  ): MetricsOverview {
+
+  private static normalizeEngagementPercent(value: number): number {
+    const v = Number(value ?? 0);
+
+    if (!Number.isFinite(v)) return 0;
+    if (v > 0 && v <= 1) return v * 100;
+
+    return v;
+  }
+
+  static buildOverview(current: MetricsSnapshot, previous: MetricsSnapshot): MetricsOverview {
+    const followersBase = compareKpi("Seguidores", current.followers, previous.followers);
+    const followersDelta = Number(followersBase.delta ?? 0);
+
+    const followers: KpiComparativeDTO = {
+      ...followersBase,
+      gained: followersDelta > 0 ? followersDelta : 0,
+      lost: followersDelta < 0 ? Math.abs(followersDelta) : 0,
+    };
+
+    const reach = compareKpi("Alcance", current.reach, previous.reach);
+
+    const interactions = compareKpi("Interações", current.totalInteractions, previous.totalInteractions);
+
+    const curEng = this.normalizeEngagementPercent(current.engagementRate ?? 0);
+    const prevEng = this.normalizeEngagementPercent(previous.engagementRate ?? 0);
+
+    const engagement = compareEngagement(curEng, prevEng);
+
     return {
-      followers: compareKpi(
-        "Seguidores",
-        current.followers,
-        previous.followers
-      ),
-
-      reach: compareKpi(
-        "Alcance",
-        current.reach,
-        previous.reach
-      ),
-
-      interactions: compareKpi(
-        "Interações",
-        current.totalInteractions,
-        previous.totalInteractions
-      ),
-
-      engagement: compareEngagement(
-        current.engagementRate * 100, // converte para %
-        previous.engagementRate * 100
-      ),
+      followers,
+      reach,
+      interactions,
+      engagement,
     };
   }
 }
