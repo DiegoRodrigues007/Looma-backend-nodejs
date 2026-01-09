@@ -1,8 +1,18 @@
 import { Router } from "express";
 import { MetricsController } from "../controllers/MetricsController";
 
+// ✅ NOVO (Insights)
+import { PrismaMetricsSnapshotRepository } from "../../../infrastructure/db/PrismaMetricsSnapshotRepository";
+import { WeeklyInsightsService } from "../../../application/services/WeeklyInsightsService";
+import { InsightsController } from "../controllers/InsightsController";
+
 const router = Router();
 const controller = new MetricsController();
+
+// ✅ NOVO (wiring igual seu padrão: instâncias direto no routes)
+const snapshotRepo = new PrismaMetricsSnapshotRepository();
+const weeklyInsightsService = new WeeklyInsightsService(snapshotRepo);
+const insightsController = new InsightsController(weeklyInsightsService);
 
 /**
  * @swagger
@@ -91,10 +101,7 @@ router.post(
  *       401:
  *         description: Usuário não autenticado
  */
-router.get(
-  "/instagram/overview",
-  controller.instagramOverview.bind(controller)
-);
+router.get("/instagram/overview", controller.instagramOverview.bind(controller));
 
 /**
  * @swagger
@@ -139,9 +146,39 @@ router.get(
  *       401:
  *         description: Usuário não autenticado
  */
+router.get("/instagram/period", controller.instagramPeriod.bind(controller));
+
+/**
+ * @swagger
+ * /api/metrics/instagram/insights/weekly:
+ *   get:
+ *     summary: Retorna insights semanais (regras simples, sem IA pesada)
+ *     description: >
+ *       Gera alertas analíticos para o dashboard (ex: queda de engajamento, alcance em queda,
+ *       aumento de interações), comparando os últimos N dias com os N dias anteriores.
+ *     tags:
+ *       - Metrics
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: days
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           example: 7
+ *         description: Dias do período atual (compara com os N dias anteriores). Min 3, max 30.
+ *     responses:
+ *       200:
+ *         description: Insights retornados com sucesso
+ *       401:
+ *         description: Usuário não autenticado
+ *       500:
+ *         description: Falha ao gerar insights
+ */
 router.get(
-  "/instagram/period",
-  controller.instagramPeriod.bind(controller)
+  "/instagram/insights/weekly",
+  insightsController.weeklyInstagramInsights.bind(insightsController)
 );
 
 export default router;
