@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { MetricsController } from "../controllers/MetricsController";
 
-// ✅ NOVO (Insights)
+// ✅ Insights
 import { PrismaMetricsSnapshotRepository } from "../../../infrastructure/db/PrismaMetricsSnapshotRepository";
 import { WeeklyInsightsService } from "../../../application/services/WeeklyInsightsService";
 import { InsightsController } from "../controllers/InsightsController";
@@ -9,7 +9,7 @@ import { InsightsController } from "../controllers/InsightsController";
 const router = Router();
 const controller = new MetricsController();
 
-// ✅ NOVO (wiring igual seu padrão: instâncias direto no routes)
+// ✅ wiring igual seu padrão: instâncias direto no routes
 const snapshotRepo = new PrismaMetricsSnapshotRepository();
 const weeklyInsightsService = new WeeklyInsightsService(snapshotRepo);
 const insightsController = new InsightsController(weeklyInsightsService);
@@ -179,6 +179,52 @@ router.get("/instagram/period", controller.instagramPeriod.bind(controller));
 router.get(
   "/instagram/insights/weekly",
   insightsController.weeklyInstagramInsights.bind(insightsController)
+);
+
+/**
+ * ✅ NOVO: insights do tooltip (post específico)
+ *
+ * @swagger
+ * /api/metrics/instagram/insights/post:
+ *   get:
+ *     summary: Gera insights acionáveis para um post (tooltip do gráfico)
+ *     description: >
+ *       Gera A) Por que aconteceu (com prova), B) O que melhorar (vs baseline),
+ *       C) O que continuar fazendo. Pode usar IA (Ollama/llama3.2) como narrador,
+ *       mas os números/provas são sempre calculados no backend.
+ *     tags:
+ *       - Metrics
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: postId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: ID do post (Instagram media id) associado ao pico do gráfico
+ *       - in: query
+ *         name: baselineDays
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           example: 30
+ *         description: Quantidade de dias usados como baseline (min 7, max 90). Default 30.
+ *     responses:
+ *       200:
+ *         description: Insights do post retornados com sucesso
+ *       400:
+ *         description: postId ausente ou Instagram não conectado
+ *       401:
+ *         description: Usuário não autenticado
+ *       404:
+ *         description: Post não encontrado
+ *       500:
+ *         description: Falha ao gerar insights do post
+ */
+router.get(
+  "/instagram/insights/post",
+  insightsController.instagramPostInsights.bind(insightsController)
 );
 
 export default router;
