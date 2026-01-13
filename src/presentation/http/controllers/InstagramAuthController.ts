@@ -1,9 +1,54 @@
 import { Request, Response } from "express";
 import crypto from "crypto";
 import axios from "axios";
+import type { AxiosResponse } from "axios";
 import { IInstagramIgLoginAuthService } from "../../../application/instagram/IInstagramIgLoginAuthService";
 import { CompleteIgLoginUseCase } from "../../../application/instagram/CompleteIgLoginUseCase";
 import { prisma } from "../../../infrastructure/db/prismaClient";
+
+/* =========================
+   Tipos (Graph API)
+========================= */
+
+type IgMediaItem = {
+  id: string;
+  timestamp: string;
+  like_count?: number | string;
+  comments_count?: number | string;
+
+  // usados no fetchTopContent:
+  caption?: string | null;
+  media_type?: string;
+  media_url?: string | null;
+  thumbnail_url?: string | null;
+  permalink?: string | null;
+};
+
+type IgMediaResponse = {
+  data: IgMediaItem[];
+  paging?: {
+    cursors?: {
+      after?: string;
+    };
+    next?: string;
+  };
+};
+
+type IgInsightRow = {
+  name?: string;
+  period?: string;
+  values?: Array<{ value?: any; end_time?: string }>;
+  value?: any;
+  total_value?: any;
+};
+
+type IgInsightsResponse = {
+  data: IgInsightRow[];
+};
+
+/* =========================
+   Helpers de data
+========================= */
 
 function ymd(d: Date) {
   return d.toISOString().slice(0, 10);
@@ -24,31 +69,73 @@ function listDays(from: string, to: string): string[] {
   return days;
 }
 
+/**
+ * Graph API às vezes devolve números em formatos como:
+ * - 12
+ * - "12"
+ * - { value: 12 }
+ * - { value: { value: 12 } }
+ * - { total_value: { value: 12 } }
+ * - { values: [{ value: 12 }] }
+ */
 function toFiniteNumber(v: any): number {
+  const unwrap = (x: any): any => {
+    if (x == null) return 0;
 
-  const raw =
-    v == null
-      ? 0
-      : typeof v === "object"
-      ? (v as any).value ?? (v as any).values?.[0]?.value ?? v
-      : v;
+    if (typeof x === "number" || typeof x === "string") return x;
 
-  const n = Number(raw);
+    if (typeof x === "object") {
+      if ("total_value" in x) return unwrap((x as any).total_value);
+      if ("value" in x) return unwrap((x as any).value);
+
+      if (Array.isArray((x as any).values) && (x as any).values.length > 0) {
+        const first = (x as any).values[0];
+        return unwrap(first?.value ?? first);
+      }
+
+      return 0;
+    }
+
+    return 0;
+  };
+
+  const n = Number(unwrap(v));
   return Number.isFinite(n) ? n : 0;
 }
 
-function mapInsightByDay(insightsData: any[], metricName: string): Record<string, number> {
-  const item = insightsData?.find((x: any) => x?.name === metricName);
-  const values = item?.values ?? [];
+/**
+ * ✅ Mapper robusto por dia
+ * - usa values[] quando existe
+ * - se não existir values, joga total no último dia (fallback)
+ */
+function mapInsightByDayRobust(
+  insightsData: any[],
+  metricName: string,
+  days: string[],
+  fallbackValue = 0
+): Record<string, number> {
   const out: Record<string, number> = {};
+  for (const d of days) out[d] = 0;
 
-  for (const v of values) {
-    const endTime: string | undefined = v?.end_time;
-    if (!endTime) continue;
+  const item = insightsData?.find((x: any) => x?.name === metricName);
+  if (!item) return out;
 
-    const day = endTime.slice(0, 10);
-    out[day] = toFiniteNumber(v?.value);
+  const values = item?.values;
+  if (Array.isArray(values) && values.length > 0) {
+    for (const v of values) {
+      const endTime: string | undefined = v?.end_time;
+      if (!endTime) continue;
+
+      const day = endTime.slice(0, 10);
+      out[day] = toFiniteNumber(v?.value);
+    }
+    return out;
   }
+
+  // fallback: sem values não dá pra saber por dia -> coloca no último dia
+  const total = toFiniteNumber(item?.total_value ?? item?.value ?? fallbackValue);
+  const lastDay = days[days.length - 1];
+  out[lastDay] = total;
 
   return out;
 }
@@ -110,7 +197,6 @@ function verifyState(signed: string): string | null {
   const sig = signed.slice(idx + 1);
 
   const expected = crypto.createHmac("sha256", STATE_SIGN_SECRET).update(payload).digest("hex");
-
   if (sig.length !== expected.length) return null;
 
   const ok = crypto.timingSafeEqual(Buffer.from(sig, "utf8"), Buffer.from(expected, "utf8"));
@@ -223,7 +309,6 @@ async function getFollowersSeriesFromDb(opts: {
   }
 }
 
-
 async function saveTodayFollowersSnapshot(opts: { userId: string; igUserId: string; followers: number }) {
   const { userId, igUserId, followers } = opts;
 
@@ -240,7 +325,144 @@ async function saveTodayFollowersSnapshot(opts: { userId: string; igUserId: stri
       create: { userId, igUserId, day: dayDate, followers },
     });
   } catch {
+    // silencioso
   }
+}
+
+/**
+ * ✅ asyncPool correto
+ */
+async function asyncPool<T, R>(
+  poolLimit: number,
+  array: T[],
+  iteratorFn: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const ret: Promise<R>[] = [];
+  const executing = new Set<Promise<any>>();
+
+  for (let i = 0; i < array.length; i++) {
+    const p = Promise.resolve().then(() => iteratorFn(array[i], i));
+    ret.push(p);
+
+    executing.add(p);
+    const clean = () => executing.delete(p);
+    p.then(clean).catch(clean);
+
+    if (executing.size >= poolLimit) {
+      await Promise.race(executing);
+    }
+  }
+
+  return Promise.all(ret);
+}
+
+/**
+ * ✅ Interações por POST somadas por DIA:
+ * - likes (like_count)
+ * - comments (comments_count)
+ * - shares (insights)
+ * - saves (insights -> saved)
+ */
+async function fetchDailyInteractionsByPosts(opts: {
+  igUserId: string;
+  accessToken: string;
+  from: string;
+  to: string;
+  graph: ReturnType<typeof axios.create>;
+}) {
+  const { igUserId, accessToken, from, to, graph } = opts;
+
+  const fromTs = parseYmd(from).getTime();
+  const toTs = parseYmd(to).getTime() + 86399999;
+
+  const allMedia: IgMediaItem[] = [];
+  let after: string | undefined = undefined;
+
+  for (let guard = 0; guard < 30; guard++) {
+    const mediaRes: AxiosResponse<IgMediaResponse> = await graph.get<IgMediaResponse>(`/${igUserId}/media`, {
+      params: {
+        fields: "id,timestamp,like_count,comments_count",
+        limit: 100,
+        after,
+        access_token: accessToken,
+      },
+    });
+
+    const data: IgMediaItem[] = mediaRes.data?.data ?? [];
+    allMedia.push(...data);
+
+    const nextAfter = mediaRes.data?.paging?.cursors?.after;
+    if (!nextAfter) break;
+    after = nextAfter;
+
+    const oldest = data[data.length - 1]?.timestamp;
+    if (oldest) {
+      const oldestTs = new Date(oldest).getTime();
+      if (oldestTs < fromTs) break;
+    }
+  }
+
+  const inRange = allMedia.filter((m) => {
+    const ts = new Date(m.timestamp).getTime();
+    return ts >= fromTs && ts <= toTs;
+  });
+
+  const likesByDay: Record<string, number> = {};
+  const commentsByDay: Record<string, number> = {};
+  const sharesByDay: Record<string, number> = {};
+  const savesByDay: Record<string, number> = {};
+  const totalByDay: Record<string, number> = {};
+
+  const add = (map: Record<string, number>, day: string, v: number) => {
+    map[day] = (map[day] ?? 0) + (Number.isFinite(v) ? v : 0);
+  };
+
+  for (const m of inRange) {
+    const day = ymd(new Date(m.timestamp));
+    const likes = toFiniteNumber(m.like_count);
+    const comments = toFiniteNumber(m.comments_count);
+
+    add(likesByDay, day, likes);
+    add(commentsByDay, day, comments);
+    add(totalByDay, day, likes + comments);
+  }
+
+  await asyncPool(6, inRange, async (m) => {
+    try {
+      const insightsRes: AxiosResponse<IgInsightsResponse> = await graph.get<IgInsightsResponse>(`/${m.id}/insights`, {
+        params: {
+          metric: "shares,saved",
+          access_token: accessToken,
+        },
+      });
+
+      const arr = insightsRes.data?.data ?? [];
+
+      const pickValue = (row: IgInsightRow): number => {
+        const v = row?.values?.[0]?.value ?? row?.total_value ?? row?.value ?? row ?? 0;
+        return toFiniteNumber(v);
+      };
+
+      const map: Record<string, number> = {};
+      for (const r of arr) {
+        const name = String(r?.name ?? "");
+        map[name] = pickValue(r);
+      }
+
+      const shares = toFiniteNumber(map.shares);
+      const saved = toFiniteNumber(map.saved);
+
+      const day = ymd(new Date(m.timestamp));
+
+      add(sharesByDay, day, shares);
+      add(savesByDay, day, saved);
+      add(totalByDay, day, shares + saved);
+    } catch {
+      // silencioso
+    }
+  });
+
+  return { likesByDay, commentsByDay, sharesByDay, savesByDay, totalByDay };
 }
 
 async function fetchTopContent(opts: {
@@ -256,7 +478,7 @@ async function fetchTopContent(opts: {
   const fromTs = parseYmd(from).getTime();
   const toTs = parseYmd(to).getTime() + 86399999;
 
-  const mediaRes = await graph.get(`/${igUserId}/media`, {
+  const mediaRes: AxiosResponse<IgMediaResponse> = await graph.get<IgMediaResponse>(`/${igUserId}/media`, {
     params: {
       fields:
         "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count",
@@ -269,11 +491,11 @@ async function fetchTopContent(opts: {
   const denom = Math.max(1, toFiniteNumber(followersBase));
 
   const items = data
-    .filter((m: any) => {
+    .filter((m) => {
       const ts = new Date(m.timestamp).getTime();
       return ts >= fromTs && ts <= toTs;
     })
-    .map((m: any) => {
+    .map((m) => {
       const likes = toFiniteNumber(m.like_count);
       const comments = toFiniteNumber(m.comments_count);
       const engagement = likes + comments;
@@ -306,13 +528,13 @@ async function fetchTopContent(opts: {
             },
       };
     })
-    .sort((a: any, b: any) => b.likes + b.comments - (a.likes + a.comments))
+    .sort((a, b) => b.likes + b.comments - (a.likes + a.comments))
     .slice(0, 6);
 
   const enriched = await Promise.all(
-    items.map(async (it: any) => {
+    items.map(async (it) => {
       try {
-        const insightsRes = await graph.get(`/${it.id}/insights`, {
+        const insightsRes: AxiosResponse<IgInsightsResponse> = await graph.get<IgInsightsResponse>(`/${it.id}/insights`, {
           params: {
             metric: "plays,video_views,reach,total_interactions,shares,saved",
             access_token: accessToken,
@@ -321,9 +543,9 @@ async function fetchTopContent(opts: {
 
         const arr = insightsRes.data?.data ?? [];
 
-        const pickValue = (row: any): number | null => {
-          const v = row?.values?.[0]?.value ?? row?.total_value?.value ?? row?.value ?? null;
-          const n = Number(v);
+        const pickValue = (row: IgInsightRow): number | null => {
+          const v = row?.values?.[0]?.value ?? row?.total_value ?? row?.value ?? row ?? null;
+          const n = toFiniteNumber(v);
           return Number.isFinite(n) ? n : null;
         };
 
@@ -578,6 +800,7 @@ export class InstagramAuthController {
 
       await saveTodayFollowersSnapshot({ userId, igUserId, followers: currentFollowers });
 
+      const days = listDays(from, to);
 
       const reachRes = await graph.get(`/${igUserId}/insights`, {
         params: {
@@ -589,9 +812,10 @@ export class InstagramAuthController {
         },
       });
 
-      const totalsRes = await graph.get(`/${igUserId}/insights`, {
+      // ✅ CORRIGIDO DE VERDADE: profile_views precisa metric_type=total_value (erro #100)
+      const profileViewsRes = await graph.get(`/${igUserId}/insights`, {
         params: {
-          metric: "profile_views,total_interactions",
+          metric: "profile_views",
           metric_type: "total_value",
           period: "day",
           since,
@@ -601,13 +825,13 @@ export class InstagramAuthController {
       });
 
       const reachData = reachRes.data?.data ?? [];
-      const totalsData = totalsRes.data?.data ?? [];
+      const profileViewsData = profileViewsRes.data?.data ?? [];
 
-      const reachByDay = mapInsightByDay(reachData, "reach");
-      const profileViewsByDay = mapInsightByDay(totalsData, "profile_views");
-      const totalInteractionsByDay = mapInsightByDay(totalsData, "total_interactions");
+      // reach normal
+      const reachByDay = mapInsightByDayRobust(reachData, "reach", days, 0);
 
-      const days = listDays(from, to);
+      // profile views robusto (com fallback)
+      const profileViewsByDay = mapInsightByDayRobust(profileViewsData, "profile_views", days, 0);
 
       const { followersByDay, hasHistory } = await getFollowersSeriesFromDb({
         userId,
@@ -616,11 +840,19 @@ export class InstagramAuthController {
         fallbackFollowers: currentFollowers,
       });
 
+      const daily = await fetchDailyInteractionsByPosts({
+        igUserId,
+        accessToken,
+        from,
+        to,
+        graph,
+      });
+
       const timeseries = days.map((day) => {
         const reach = reachByDay[day] ?? 0;
         const profileViews = profileViewsByDay[day] ?? 0;
-        const totalInteractions = totalInteractionsByDay[day] ?? 0;
 
+        const totalInteractions = daily.totalByDay[day] ?? 0;
         const engagementRate = reach > 0 ? (totalInteractions / reach) * 100 : 0;
 
         const followers = followersByDay[day] ?? currentFollowers;
@@ -665,6 +897,8 @@ export class InstagramAuthController {
         account: { igUserId, username },
         meta: {
           followersHistorySource: hasHistory ? "db" : "fallback",
+          interactionsSource: "posts_sum",
+          profileViewsSource: "ig_insights_total_value",
         },
       });
     } catch (err: any) {
