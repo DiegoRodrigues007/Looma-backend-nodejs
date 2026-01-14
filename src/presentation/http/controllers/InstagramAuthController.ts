@@ -16,7 +16,6 @@ type IgMediaItem = {
   like_count?: number | string;
   comments_count?: number | string;
 
-  // usados no fetchTopContent:
   caption?: string | null;
   media_type?: string;
   media_url?: string | null;
@@ -27,9 +26,7 @@ type IgMediaItem = {
 type IgMediaResponse = {
   data: IgMediaItem[];
   paging?: {
-    cursors?: {
-      after?: string;
-    };
+    cursors?: { after?: string };
     next?: string;
   };
 };
@@ -132,7 +129,6 @@ function mapInsightByDayRobust(
     return out;
   }
 
-  // fallback: sem values não dá pra saber por dia -> coloca no último dia
   const total = toFiniteNumber(item?.total_value ?? item?.value ?? fallbackValue);
   const lastDay = days[days.length - 1];
   out[lastDay] = total;
@@ -465,6 +461,84 @@ async function fetchDailyInteractionsByPosts(opts: {
   return { likesByDay, commentsByDay, sharesByDay, savesByDay, totalByDay };
 }
 
+/**
+ * ✅ Top Content DB-first:
+ * - Se houver posts importados no banco para o período, usa banco (rápido e histórico).
+ * - Caso contrário, cai no Graph API (comportamento antigo).
+ */
+async function fetchTopContentFromDb(opts: {
+  userId: string;
+  from: string;
+  to: string;
+  followersBase: number;
+}) {
+  const { userId, from, to, followersBase } = opts;
+
+  const fromDate = parseYmd(from);
+  const toDate = new Date(parseYmd(to).getTime() + 86399999);
+
+  // IMPORTANTE: só funciona quando existirem esses models no prisma:
+  // InstagramPost + InstagramPostMetric (relation "metrics")
+  const posts = await prisma.instagramPost.findMany({
+    where: {
+      userId,
+      publishedAt: { gte: fromDate, lte: toDate },
+    },
+    orderBy: { publishedAt: "desc" },
+    take: 200,
+    include: {
+      metrics: { orderBy: { pulledAt: "desc" }, take: 1 },
+    },
+  });
+
+  if (!posts.length) return null;
+
+  const denom = Math.max(1, toFiniteNumber(followersBase));
+
+  const items = posts
+    .map((p) => {
+      const m = p.metrics?.[0];
+
+      const likes = toFiniteNumber((p as any).likeCount);
+      const comments = toFiniteNumber((p as any).commentsCount);
+
+      const reach = toFiniteNumber((m as any)?.reach);
+      const shares = toFiniteNumber((m as any)?.shares);
+      const saved = toFiniteNumber((m as any)?.saves);
+      const totalInteractions =
+        toFiniteNumber((m as any)?.totalInteractions) || likes + comments + shares + saved;
+
+      const plays = toFiniteNumber((m as any)?.plays);
+      const videoViews = toFiniteNumber((m as any)?.videoViews);
+      const views = plays || videoViews || null;
+
+      return {
+        id: String((p as any).igMediaId),
+        permalink: String((p as any).permalink ?? ""),
+        caption: (p as any).caption ?? null,
+        thumb: (p as any).thumb ?? null, // se existir no schema
+        mediaType: String((p as any).mediaType ?? "IMAGE"),
+        publishedAt: (p as any).publishedAt.toISOString(),
+        engagementRate: ((likes + comments) / denom) * 100,
+        likes,
+        comments,
+        views,
+        insights: {
+          plays: plays || null,
+          videoViews: videoViews || null,
+          reach: reach || null,
+          totalInteractions: totalInteractions || null,
+          shares: shares || null,
+          saved: saved || null,
+        },
+      };
+    })
+    .sort((a, b) => (b.insights?.totalInteractions ?? 0) - (a.insights?.totalInteractions ?? 0))
+    .slice(0, 6);
+
+  return items;
+}
+
 async function fetchTopContent(opts: {
   igUserId: string;
   accessToken: string;
@@ -480,8 +554,7 @@ async function fetchTopContent(opts: {
 
   const mediaRes: AxiosResponse<IgMediaResponse> = await graph.get<IgMediaResponse>(`/${igUserId}/media`, {
     params: {
-      fields:
-        "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count",
+      fields: "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count",
       limit: 50,
       access_token: accessToken,
     },
@@ -513,9 +586,7 @@ async function fetchTopContent(opts: {
         engagementRate: (engagement / denom) * 100,
         likes,
         comments,
-
         views: null as number | null,
-
         insights: null as
           | null
           | {
@@ -577,6 +648,62 @@ async function fetchTopContent(opts: {
   );
 
   return enriched;
+}
+
+/**
+ * ✅ Cria job de backfill automaticamente após conectar.
+ * - evita duplicar jobs queued/running
+ * - amarra no instagramAccountId (multi-conta)
+ */
+async function enqueueInstagramBackfill(opts: { userId: string; instagramAccountId: string }) {
+  const { userId, instagramAccountId } = opts;
+
+  const existing = await prisma.instagramBackfillJob.findFirst({
+    where: {
+      userId,
+      instagramAccountId,
+      status: { in: ["queued", "running"] },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  if (existing) return existing;
+
+  const job = await prisma.instagramBackfillJob.create({
+    data: {
+      userId,
+      instagramAccountId,
+      status: "queued",
+    },
+  });
+
+  return job;
+}
+
+/* =========================
+   Helpers multi-conta
+========================= */
+
+function getInstagramAccountIdFromQuery(req: Request): string | null {
+  const v = req.query.instagramAccountId ?? req.query.accountId;
+  if (v == null) return null;
+  const s = String(v).trim();
+  return s.length > 0 ? s : null;
+}
+
+async function getInstagramAccountForRequest(userId: string, instagramAccountId?: string | null) {
+  if (instagramAccountId) {
+    return prisma.instagramAccount.findFirst({
+      where: { id: instagramAccountId, userId },
+      orderBy: { updatedAt: "desc" },
+    });
+  }
+
+  // fallback (comportamento antigo)
+  return prisma.instagramAccount.findFirst({
+    where: { userId },
+    orderBy: { updatedAt: "desc" },
+  });
 }
 
 export class InstagramAuthController {
@@ -654,16 +781,26 @@ export class InstagramAuthController {
       userId,
     });
 
+    let connectedAccountId: string | null = null;
+    let igUserId: string | null = null;
+
     try {
       const result: any = await this.completeLogin.execute(code, state ?? "", userId);
-
-      const igUserId = extractIgUserId(result);
+      igUserId = extractIgUserId(result);
 
       if (igUserId) {
         await prisma.instagramAccount.updateMany({
           where: { instagramId: igUserId },
           data: { userId, isConnected: true },
         });
+
+        const acc = await prisma.instagramAccount.findFirst({
+          where: { userId, instagramId: igUserId },
+          orderBy: { updatedAt: "desc" },
+          select: { id: true },
+        });
+
+        connectedAccountId = acc?.id ?? null;
       } else {
         const latest = await prisma.instagramAccount.findFirst({
           where: { userId },
@@ -675,7 +812,23 @@ export class InstagramAuthController {
             where: { id: latest.id },
             data: { isConnected: true },
           });
+
+          connectedAccountId = latest.id;
+          igUserId = latest.instagramId ?? null;
         }
+      }
+
+      // ✅ ENFILEIRA O BACKFILL AUTOMATICAMENTE
+      if (connectedAccountId) {
+        const job = await enqueueInstagramBackfill({ userId, instagramAccountId: connectedAccountId });
+        reminderLogSafe("[IG] backfill enqueued", {
+          userId,
+          instagramAccountId: connectedAccountId,
+          jobId: job.id,
+          status: job.status,
+        });
+      } else {
+        reminderLogSafe("[IG] backfill not enqueued (no accountId)", { userId, igUserId });
       }
     } catch (err: any) {
       console.error("[IG] callback error:", err?.response?.data ?? err);
@@ -714,14 +867,17 @@ export class InstagramAuthController {
       userId,
       hasRow: !!row,
       instagramId: row?.instagramId ?? null,
+      instagramAccountId: row?.id ?? null,
       isConnected: row?.isConnected ?? false,
       hasAccessToken: !!row?.accessToken,
       hasPageAccessToken: !!row?.pageAccessToken,
       computedConnected: connected,
     });
 
+    // ✅ AQUI: retorna o instagramAccountId (ID interno do banco)
     res.json({
       connected,
+      instagramAccountId: row?.id ?? null,
       igUserId: row?.instagramId ?? null,
       username: row?.instagramUserName ?? null,
       accountType: row?.accountType ?? null,
@@ -768,12 +924,16 @@ export class InstagramAuthController {
       return;
     }
 
-    const row = await prisma.instagramAccount.findFirst({
-      where: { userId },
-      orderBy: { updatedAt: "desc" },
-    });
+    // ✅ multi-conta: permite escolher conta por query
+    const instagramAccountId = getInstagramAccountIdFromQuery(req);
+    const row = await getInstagramAccountForRequest(userId, instagramAccountId);
 
-    if (!row || !row.isConnected || !row.instagramId || (!row.pageAccessToken && !row.accessToken)) {
+    if (
+      !row ||
+      !row.isConnected ||
+      !row.instagramId ||
+      (!row.pageAccessToken && !row.accessToken)
+    ) {
       res.status(409).json({ message: "Instagram não conectado" });
       return;
     }
@@ -812,7 +972,7 @@ export class InstagramAuthController {
         },
       });
 
-      // ✅ CORRIGIDO DE VERDADE: profile_views precisa metric_type=total_value (erro #100)
+      // ✅ CORRIGIDO: profile_views precisa metric_type=total_value (erro #100)
       const profileViewsRes = await graph.get(`/${igUserId}/insights`, {
         params: {
           metric: "profile_views",
@@ -827,10 +987,7 @@ export class InstagramAuthController {
       const reachData = reachRes.data?.data ?? [];
       const profileViewsData = profileViewsRes.data?.data ?? [];
 
-      // reach normal
       const reachByDay = mapInsightByDayRobust(reachData, "reach", days, 0);
-
-      // profile views robusto (com fallback)
       const profileViewsByDay = mapInsightByDayRobust(profileViewsData, "profile_views", days, 0);
 
       const { followersByDay, hasHistory } = await getFollowersSeriesFromDb({
@@ -869,16 +1026,28 @@ export class InstagramAuthController {
 
       const followersKpi = timeseries[timeseries.length - 1]?.followers ?? currentFollowers;
 
+      // ✅ TOP CONTENT DB-FIRST
       let topContent: any[] = [];
       try {
-        topContent = await fetchTopContent({
-          igUserId,
-          accessToken,
+        const dbTop = await fetchTopContentFromDb({
+          userId,
           from,
           to,
           followersBase: currentFollowers,
-          graph,
         });
+
+        if (dbTop && dbTop.length > 0) {
+          topContent = dbTop;
+        } else {
+          topContent = await fetchTopContent({
+            igUserId,
+            accessToken,
+            from,
+            to,
+            followersBase: currentFollowers,
+            graph,
+          });
+        }
       } catch (e: any) {
         console.warn("[IG] topContent warning:", e?.response?.data ?? e?.message ?? e);
         topContent = [];
@@ -894,11 +1063,12 @@ export class InstagramAuthController {
         },
         timeseries,
         topContent,
-        account: { igUserId, username },
+        account: { igUserId, username, instagramAccountId: row.id },
         meta: {
           followersHistorySource: hasHistory ? "db" : "fallback",
           interactionsSource: "posts_sum",
           profileViewsSource: "ig_insights_total_value",
+          topContentSource: topContent.length ? "db_or_api" : "none",
         },
       });
     } catch (err: any) {

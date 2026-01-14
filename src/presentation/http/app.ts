@@ -10,8 +10,10 @@ import { instagramRouter } from "./routes/instagram.routes";
 import { youtubeRouter } from "./routes/youtube.routes";
 import metricsRoutes from "./routes/metrics.routes";
 
+// ✅ Rotas do backfill do Instagram (prefixo /api/instagram/backfill/*)
+import instagramBackfillRoutes from "./routes/instagramBackfill.routes";
+
 // ✅ IMPORTANTE: use o MESMO middleware que já protege rotas no seu projeto
-// Ex.: "./middlewares/auth.middleware" | "./middlewares/ensureAuth" | etc.
 import { authMiddleware } from "./middlewares/authMiddleware";
 
 export const app = express();
@@ -33,14 +35,30 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
 });
 
+// ==========================
+// ✅ ROUTES
+// ==========================
 app.use("/api/auth", authRouter);
+
+// ✅ Instagram (inclui: start/callback/status/disconnect/metrics/posts)
 app.use("/api/instagram", instagramRouter);
+
+// ✅ Instagram Backfill (ex: /api/instagram/backfill/start | /status)
+app.use("/api/instagram", instagramBackfillRoutes);
+
 app.use("/api/youtube", youtubeRouter);
 
+// ✅ Metrics protegida globalmente
 app.use("/api/metrics", authMiddleware, metricsRoutes);
 
+// ==========================
+// ✅ SWAGGER
+// ==========================
 setupSwagger(app);
 
+// ==========================
+// ✅ 404
+// ==========================
 app.use((req, res) => {
   res.status(404).json({
     message: "Rota não encontrada",
@@ -49,6 +67,9 @@ app.use((req, res) => {
   });
 });
 
+// ==========================
+// ✅ ERROR HANDLER
+// ==========================
 app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
   const status = Number(err?.statusCode || err?.status || 500);
 

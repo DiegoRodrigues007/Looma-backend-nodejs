@@ -2,6 +2,9 @@ import { Router } from "express";
 import { makeInstagramAuthController } from "../../composition/instagramComposition";
 import { authMiddleware } from "../middlewares/authMiddleware";
 
+// ✅ DB
+import { prisma } from "../../../infrastructure/db/prismaClient";
+
 export const instagramRouter = Router();
 const controller = makeInstagramAuthController();
 
@@ -14,6 +17,13 @@ function parseBool(value: unknown): boolean | undefined {
   if (s === "true" || s === "1") return true;
   if (s === "false" || s === "0") return false;
   return undefined;
+}
+
+function parseYmdToUtcStart(v: string): Date {
+  return new Date(`${v}T00:00:00.000Z`);
+}
+function parseYmdToUtcEnd(v: string): Date {
+  return new Date(`${v}T23:59:59.999Z`);
 }
 
 /**
@@ -45,12 +55,10 @@ function parseBool(value: unknown): boolean | undefined {
  *         description: Não autenticado
  */
 instagramRouter.get("/start", authMiddleware, async (req, res) => {
-  // Normaliza redirect para evitar bug de "redirect" vir como string
   const redirect = parseBool(req.query.redirect);
   if (redirect !== undefined) {
     (req.query as any).redirect = redirect;
   }
-
   await controller.start(req, res);
 });
 
@@ -100,9 +108,7 @@ instagramRouter.get("/callback", async (req, res) => {
  *         description: Não autenticado
  */
 instagramRouter.get("/status", authMiddleware, async (req, res) => {
-  // Evita cache de navegador/proxy SEM criar CORS preflight (isso é header de resposta, não de request)
   res.setHeader("Cache-Control", "no-store");
-
   await controller.status(req, res);
 });
 
@@ -123,9 +129,6 @@ instagramRouter.get("/status", authMiddleware, async (req, res) => {
  */
 instagramRouter.post("/disconnect", authMiddleware, async (req, res) => {
   await controller.disconnect(req, res);
-
-  // Se o controller já respondeu, não faz nada.
-  // Se ele não respondeu, garante o contrato do OpenAPI (204).
   if (!res.headersSent) {
     return res.status(204).send();
   }
@@ -164,10 +167,110 @@ instagramRouter.post("/disconnect", authMiddleware, async (req, res) => {
  *         description: Instagram não conectado
  */
 instagramRouter.get("/metrics", authMiddleware, async (req, res) => {
-  // Também não cacheia métricas (bom pra dashboard)
+  res.setHeader("Cache-Control", "no-store");
+  await controller.metrics(req, res);
+});
+
+/**
+ * @openapi
+ * /api/instagram/posts:
+ *   get:
+ *     tags:
+ *       - Instagram Posts
+ *     summary: Listar posts importados do Instagram (DB-first)
+ *     description: Retorna posts salvos no banco (backfill), com a última métrica coletada por post.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: from
+ *         required: false
+ *         schema:
+ *           type: string
+ *           example: "2025-12-01"
+ *       - in: query
+ *         name: to
+ *         required: false
+ *         schema:
+ *           type: string
+ *           example: "2026-01-14"
+ *       - in: query
+ *         name: type
+ *         required: false
+ *         schema:
+ *           type: string
+ *           example: "REELS"
+ *       - in: query
+ *         name: limit
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           example: 50
+ *     responses:
+ *       200:
+ *         description: Lista de posts importados
+ *       401:
+ *         description: Não autenticado
+ *       501:
+ *         description: Model Prisma ainda não criado para posts
+ */
+instagramRouter.get("/posts", authMiddleware, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
 
-  await controller.metrics(req, res);
+  // ✅ se você ainda não criou os models Prisma (InstagramPost/InstagramPostMetric), não quebra o projeto:
+  const anyPrisma = prisma as any;
+  if (!anyPrisma.instagramPost) {
+    return res.status(501).json({
+      ok: false,
+      message:
+        "Model InstagramPost ainda não existe no Prisma. Crie os models (InstagramPost/InstagramPostMetric) e rode a migration.",
+    });
+  }
+
+  const userId =
+    (req as any)?.user?.sub ||
+    (req as any)?.user?.id ||
+    (req as any)?.user?.userId ||
+    (req as any)?.userId ||
+    null;
+
+  if (!userId) {
+    return res.status(401).json({ ok: false, message: "Não autenticado" });
+  }
+
+  const from = typeof req.query.from === "string" ? req.query.from.trim() : "";
+  const to = typeof req.query.to === "string" ? req.query.to.trim() : "";
+  const type = typeof req.query.type === "string" ? req.query.type.trim() : "";
+  const limitRaw = typeof req.query.limit === "string" ? Number(req.query.limit) : undefined;
+  const limit = Number.isFinite(limitRaw) ? Math.min(200, Math.max(1, limitRaw!)) : 50;
+
+  const where: any = { userId };
+  if (type) where.mediaType = type;
+
+  if (from || to) {
+    where.publishedAt = {};
+    if (from) where.publishedAt.gte = parseYmdToUtcStart(from);
+    if (to) where.publishedAt.lte = parseYmdToUtcEnd(to);
+  }
+
+  const posts = await anyPrisma.instagramPost.findMany({
+    where,
+    orderBy: { publishedAt: "desc" },
+    take: limit,
+    include: {
+      metrics: {
+        orderBy: { pulledAt: "desc" },
+        take: 1,
+      },
+    },
+  });
+
+  return res.json({
+    ok: true,
+    source: "database",
+    total: posts.length,
+    posts,
+  });
 });
 
 export default instagramRouter;

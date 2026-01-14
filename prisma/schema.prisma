@@ -18,6 +18,11 @@ enum MetricsPlatform {
   youtube
 }
 
+//
+// ==========================
+// 👤 USER
+// ==========================
+//
 model User {
   id           String   @id @default(uuid())
   email        String   @unique
@@ -28,16 +33,19 @@ model User {
   updatedAt    DateTime @updatedAt
 
   // ==========================
-  // Relations
-  // ==========================
+
   instagramAccounts InstagramAccount[]
   youtubeAccounts   YouTubeAccount[]
 
-  // ✅ histórico de métricas
+  // ✅ histórico de métricas (diário)
   metricsSnapshots MetricsSnapshot[]
 
   // ✅ refresh tokens (sessão do app)
   refreshTokens RefreshToken[]
+
+  // ✅ NOVO: posts e métricas por post (backfill)
+  instagramPosts        InstagramPost[]
+  instagramBackfillJobs InstagramBackfillJob[]
 
   @@map("User")
 }
@@ -46,9 +54,6 @@ model User {
 // ==========================
 // 🔐 REFRESH TOKENS (APP AUTH)
 // ==========================
-// Guarda refresh token do LOGIN do Looma (não confundir com YouTube refreshToken)
-// ✅ Armazena hash do token (segurança)
-// ✅ Permite revogar (logout/rotacionar)
 //
 model RefreshToken {
   id     String @id @default(uuid())
@@ -63,8 +68,7 @@ model RefreshToken {
   createdAt DateTime @default(now())
 
   // ==========================
-  // Relation
-  // ==========================
+
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
@@ -72,6 +76,11 @@ model RefreshToken {
   @@map("RefreshTokens")
 }
 
+//
+// ==========================
+// 📷 INSTAGRAM ACCOUNT
+// ==========================
+//
 model InstagramAccount {
   id                String  @id @default(uuid())
   instagramId       String  @unique
@@ -94,15 +103,22 @@ model InstagramAccount {
   updatedAt DateTime @updatedAt
 
   // ==========================
-  // Relation
-  // ==========================
+
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // ✅ NOVO: Jobs de backfill por conta (suporta multi-conta por usuário)
+  backfillJobs InstagramBackfillJob[]
 
   @@index([userId])
   @@map("InstagramAccounts")
 }
 
+//
+// ==========================
+// ▶️ YOUTUBE ACCOUNT
+// ==========================
+//
 model YouTubeAccount {
   id String @id @default(uuid())
 
@@ -130,8 +146,7 @@ model YouTubeAccount {
   updatedAt DateTime @updatedAt
 
   // ==========================
-  // Relation
-  // ==========================
+
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -141,12 +156,8 @@ model YouTubeAccount {
 
 //
 // ==========================
-// 📊 MÉTRICAS HISTÓRICAS
+// 📊 MÉTRICAS HISTÓRICAS (DIÁRIO)
 // ==========================
-// 1 snapshot por usuário / plataforma / dia
-//
-// ✅ Ajuste-chave pro híbrido:
-// - salvar "date" como DATE (sem hora) pra não quebrar por timezone
 //
 model MetricsSnapshot {
   id       String          @id @default(uuid())
@@ -165,11 +176,146 @@ model MetricsSnapshot {
   updatedAt DateTime @updatedAt
 
   // ==========================
-  // Relation
-  // ==========================
+
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, platform, date], name: "userId_platform_date")
   @@index([userId, platform, date])
   @@map("MetricsSnapshots")
+}
+
+//
+// ==========================
+// ✅ NOVO: POSTS DO INSTAGRAM (CATÁLOGO)
+// ==========================
+//
+model InstagramPost {
+  id     String @id @default(uuid())
+  userId String
+
+  // id do post na Graph API
+  igMediaId String @unique
+
+  mediaType   String?
+  publishedAt DateTime
+  caption     String?
+  permalink   String?
+
+  likeCount     Int @default(0)
+  commentsCount Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ==========================
+
+  user    User                        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  metrics InstagramPostMetric[]
+  results InstagramPostInsightResult[]
+
+  @@index([userId, publishedAt])
+  @@map("InstagramPosts")
+}
+
+//
+// ==========================
+// ✅ NOVO: MÉTRICAS DO POST (INSIGHTS)
+// ==========================
+//
+model InstagramPostMetric {
+  id       String   @id @default(uuid())
+  postId   String
+  pulledAt DateTime @default(now())
+
+  reach      Int @default(0)
+  likes      Int @default(0)
+  comments   Int @default(0)
+  shares     Int @default(0)
+  saves      Int @default(0)
+  plays      Int @default(0)
+  videoViews Int @default(0)
+
+  totalInteractions Int @default(0)
+
+  // opcional: guarda payload bruto pra debug
+  raw Json?
+
+  // ==========================
+
+  post InstagramPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@index([postId, pulledAt])
+  @@map("InstagramPostMetrics")
+}
+
+//
+// ==========================
+// ✅ NOVO: RESULTADO DO MOTOR (POS/NEG/ESTÁVEL + JSON)
+// ==========================
+// ✅ AJUSTE IMPORTANTE:
+// - permitir múltiplos resultados por post (1 por baselineWindowDays)
+// - criar unique composto (postId + baselineWindowDays)
+//
+model InstagramPostInsightResult {
+  id String @id @default(uuid())
+
+  postId             String
+  baselineWindowDays Int
+
+  verdict String // positive | negative | stable
+  score   Float?
+
+  // tudo em JSON pra evoluir sem migrar toda hora
+  evidence Json
+  why      Json
+  improve  Json
+  continue Json
+
+  computedAt DateTime @default(now())
+
+  // ==========================
+
+  post InstagramPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  // ✅ agora sim o upsert por (postId, baselineWindowDays) funciona
+  @@unique([postId, baselineWindowDays], name: "postId_baselineWindowDays")
+  @@index([postId, baselineWindowDays])
+  @@map("InstagramPostInsightResults")
+}
+
+//
+// ==========================
+// ✅ NOVO: JOB DE BACKFILL (FILA NO POSTGRES)
+// ==========================
+//
+model InstagramBackfillJob {
+  id String @id @default(uuid())
+
+  userId String
+
+  // ✅ importante: job pode ser por conta específica
+  instagramAccountId String?
+
+  status String  @default("queued") // queued|running|done|error
+  cursor String?
+
+  importedCount  Int @default(0)
+  processedCount Int @default(0)
+
+  startedAt  DateTime?
+  finishedAt DateTime?
+  lastError  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ==========================
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  instagramAccount InstagramAccount? @relation(fields: [instagramAccountId], references: [id], onDelete: SetNull)
+
+  @@index([userId, status, createdAt])
+  @@index([instagramAccountId, status, createdAt])
+  @@map("InstagramBackfillJobs")
 }

@@ -55,6 +55,52 @@ type IgCreds = {
   accessToken: string;
 };
 
+/**
+ * Tenta extrair campos padrão do orchestrator de forma robusta,
+ * sem “quebrar” caso o formato mude.
+ */
+function pickInsightPayload(data: any) {
+  const verdict =
+    data?.verdict ?? data?.result?.verdict ?? data?.rules?.verdict ?? null;
+  const score = data?.score ?? data?.result?.score ?? data?.rules?.score ?? null;
+  const evidence =
+    data?.evidence ?? data?.result?.evidence ?? data?.rules?.evidence ?? null;
+
+  const why = data?.why ?? data?.narrated?.why ?? data?.narration?.why ?? null;
+  const improve =
+    data?.improve ??
+    data?.narrated?.improve ??
+    data?.narration?.improve ??
+    null;
+  const continueDoing =
+    data?.continue ??
+    data?.continueDoing ??
+    data?.narrated?.continue ??
+    data?.narration?.continue ??
+    null;
+
+  return { verdict, score, evidence, why, improve, continueDoing };
+}
+
+/** Normaliza score para Float? do Prisma */
+function normalizeScore(score: any): number | null {
+  if (score === null || score === undefined) return null;
+  if (typeof score === "number") return Number.isFinite(score) ? score : null;
+  const n = Number(score);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Prisma: evidence/why/improve/continue são Json obrigatórios.
+ * Então aqui garantimos que nunca será null/undefined.
+ *
+ * Se você preferir objeto ao invés de array, pode trocar [] por {}.
+ */
+function ensureJson(value: any, fallback: any) {
+  if (value === null || value === undefined) return fallback;
+  return value;
+}
+
 export class InsightsController {
   private readonly topContentService = new InstagramTopContentService();
 
@@ -67,7 +113,9 @@ export class InsightsController {
    * ✅ Busca credenciais do IG corretamente pela tabela instagramAccount
    * - usa pageAccessToken se existir (normalmente é o que dá mais certo)
    */
-  private async getConnectedInstagramCreds(userId: string): Promise<IgCreds | null> {
+  private async getConnectedInstagramCreds(
+    userId: string
+  ): Promise<IgCreds | null> {
     const account = await prisma.instagramAccount.findFirst({
       where: { userId, isConnected: true },
       orderBy: { updatedAt: "desc" },
@@ -92,9 +140,7 @@ export class InsightsController {
   async weeklyInstagramInsights(req: Request, res: Response) {
     try {
       const userId = getUserIdFromReq(req);
-      if (!userId) {
-        return res.status(401).json({ message: "Unauthorized" });
-      }
+      if (!userId) return res.status(401).json({ message: "Unauthorized" });
 
       const daysRaw = Number(req.query.days ?? 7);
       const days = clampInt(daysRaw, 3, 30, 7);
@@ -127,16 +173,17 @@ export class InsightsController {
 
           topContent = top.map((x) => ({
             totalInteractions: Number(x.totalInteractions ?? 0),
-            reach: x.reach !== undefined && x.reach !== null ? Number(x.reach) : undefined,
+            reach:
+              x.reach !== undefined && x.reach !== null
+                ? Number(x.reach)
+                : undefined,
             captionLength: x.captionLength,
             mediaType: x.mediaType,
           }));
         } else {
-          // Sem IG conectado -> segue sem topContent (não quebra weekly)
           topContent = undefined;
         }
-      } catch (e) {
-        // não quebra weekly por falha no TopContent
+      } catch {
         topContent = undefined;
       }
 
@@ -159,18 +206,18 @@ export class InsightsController {
   /**
    * ✅ Tooltip do gráfico
    * GET /api/metrics/instagram/insights/post?postId=...&baselineDays=30
+   *
+   * ✅ DB-FIRST + UPSERT por unique composto:
+   * postId_baselineWindowDays
    */
   async instagramPostInsights(req: Request, res: Response) {
     try {
       const userId = getUserIdFromReq(req);
-      if (!userId) {
-        return res.status(401).json({ message: "Unauthorized" });
-      }
+      if (!userId) return res.status(401).json({ message: "Unauthorized" });
 
-      const postId = String(req.query.postId ?? "").trim();
-      if (!postId) {
+      const postIdRaw = String(req.query.postId ?? "").trim();
+      if (!postIdRaw)
         return res.status(400).json({ message: "postId is required" });
-      }
 
       const baselineDaysRaw = Number(req.query.baselineDays ?? 30);
       const baselineDays = clampInt(baselineDaysRaw, 7, 90, 30);
@@ -182,16 +229,146 @@ export class InsightsController {
         });
       }
 
+      /**
+       * 1) Resolver o "post interno" (InstagramPosts.id) a partir do postId do front.
+       *    - Se o front mandar igMediaId (ex: "1795070..."), buscamos por igMediaId
+       *    - Se mandar UUID (id interno), tentamos buscar por id
+       */
+      const post =
+        (await prisma.instagramPost.findFirst({
+          where: { userId: String(userId), igMediaId: postIdRaw },
+          select: { id: true, igMediaId: true },
+        })) ??
+        (await prisma.instagramPost.findFirst({
+          where: { userId: String(userId), id: postIdRaw },
+          select: { id: true, igMediaId: true },
+        }));
+
+      if (!post?.id) {
+        // Se não tem o post no banco ainda, ainda dá pra calcular via API,
+        // mas não dá pra salvar resultado sem postId interno.
+        const data = await this.postInsightsService.run({
+          accessToken: creds.accessToken,
+          igUserId: creds.igUserId,
+          postId: postIdRaw, // aqui é igMediaId
+          baselineDays,
+        });
+
+        return res.status(200).json({
+          ...data,
+          meta: {
+            ...(data?.meta ?? {}),
+            insightsSource: "computed_not_persisted",
+            reason: "post_not_found_in_db",
+          },
+        });
+      }
+
+      /**
+       * 2) DB-FIRST: tenta pegar resultado já salvo
+       */
+      const cached = await prisma.instagramPostInsightResult.findFirst({
+        where: {
+          postId: post.id,
+          baselineWindowDays: baselineDays,
+        },
+        orderBy: { computedAt: "desc" },
+      });
+
+      if (cached) {
+        return res.status(200).json({
+          ok: true,
+          source: "database",
+          postId: post.igMediaId ?? postIdRaw,
+          baselineDays,
+          verdict: (cached as any).verdict ?? null,
+          score: (cached as any).score ?? null,
+          evidence: (cached as any).evidence ?? null,
+          why: (cached as any).why ?? null,
+          improve: (cached as any).improve ?? null,
+          continue: (cached as any).continue ?? null,
+        });
+      }
+
+      /**
+       * 3) Se não tiver no banco, calcula
+       */
       const data = await this.postInsightsService.run({
         accessToken: creds.accessToken,
         igUserId: creds.igUserId,
-        postId,
+        postId: post.igMediaId ?? postIdRaw,
         baselineDays,
       });
 
-      // ✅ não impõe formato aqui: apenas devolve o que o orchestrator retornar
-      // (inclusive narrated / narratedJson etc)
-      return res.status(200).json(data);
+      const picked = pickInsightPayload(data);
+
+      /**
+       * 4) Normaliza payload para não quebrar o Prisma (campos obrigatórios)
+       */
+      const safeVerdict = String(picked.verdict ?? "stable");
+      const safeScore = normalizeScore(picked.score);
+
+      // JSON obrigatórios: nunca podem ser null
+      // (Escolhi array como padrão porque seu Narrated costuma ser lista de itens)
+      const safeEvidence = ensureJson(picked.evidence, []);
+      const safeWhy = ensureJson(picked.why, []);
+      const safeImprove = ensureJson(picked.improve, []);
+      const safeContinue = ensureJson(picked.continueDoing, []);
+
+      /**
+       * 5) Persistência (UPSERT) com unique composto
+       */
+      try {
+        await prisma.instagramPostInsightResult.upsert({
+          where: {
+            postId_baselineWindowDays: {
+              postId: post.id,
+              baselineWindowDays: baselineDays,
+            },
+          },
+          update: {
+            verdict: safeVerdict,
+            score: safeScore,
+            evidence: safeEvidence,
+            why: safeWhy,
+            improve: safeImprove,
+            continue: safeContinue,
+            computedAt: new Date(),
+          },
+          create: {
+            postId: post.id,
+            baselineWindowDays: baselineDays,
+            verdict: safeVerdict,
+            score: safeScore,
+            evidence: safeEvidence,
+            why: safeWhy,
+            improve: safeImprove,
+            continue: safeContinue,
+            // computedAt tem default
+          },
+        });
+      } catch (e: any) {
+        // ✅ Agora você vê o motivo (sem quebrar a UX do tooltip)
+        return res.status(200).json({
+          ...data,
+          meta: {
+            ...(data?.meta ?? {}),
+            insightsSource: "computed_but_persist_failed",
+            persistError: e?.message ?? String(e),
+          },
+        });
+      }
+
+      /**
+       * 6) Retorna pro front
+       */
+      return res.status(200).json({
+        ...data,
+        meta: {
+          ...(data?.meta ?? {}),
+          insightsSource: "computed_and_persisted",
+        },
+      });
     } catch (err: any) {
       const status = Number(err?.statusCode) || 500;
 
