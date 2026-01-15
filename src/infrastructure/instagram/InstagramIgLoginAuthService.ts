@@ -1,26 +1,94 @@
-import { IInstagramIgLoginAuthService } from "../../application/instagram/IInstagramIgLoginAuthService";
-import { InstagramIgLoginClient } from "./InstagramIgLoginClient";
+import {
+  IInstagramIgLoginAuthService,
+  InstagramAuthReauthRequired,
+  InstagramAuthResolved,
+} from "../../application/instagram/IInstagramIgLoginAuthService";
+import { InstagramIgLoginClient, IgCandidate } from "./InstagramIgLoginClient";
 
 export class InstagramIgLoginAuthService implements IInstagramIgLoginAuthService {
   constructor(private readonly client: InstagramIgLoginClient) {}
 
-  buildLoginUrl(state: string): string {
-    return this.client.buildLoginUrl(state);
+  /**
+   * 🔗 Gera URL de login
+   * @param state
+   * @param forceReRequest força o Meta a pedir permissões novamente
+   */
+  buildLoginUrl(state: string, forceReRequest = false): string {
+    return this.client.buildLoginUrl(state, forceReRequest);
   }
 
-  exchangeCodeForShortToken(code: string) {
+
+  async exchangeCodeForShortToken(code: string) {
     return this.client.exchangeCodeForShortToken(code);
   }
 
-  exchangeShortForLong(shortToken: string) {
+  async exchangeShortForLong(shortToken: string) {
     return this.client.exchangeShortForLong(shortToken);
   }
 
-  refreshLongToken(longToken: string) {
+  async refreshLongToken(longToken: string) {
     return this.client.refreshLong(longToken);
   }
 
-  getMe(accessToken: string) {
+  async resolveMeOrReauth(
+    accessToken: string
+  ): Promise<InstagramAuthResolved | InstagramAuthReauthRequired> {
+    const granted = await this.client.getGrantedPermissions(accessToken);
+
+    if (!this.client.hasRequiredPermissions(granted)) {
+      const required = ["pages_show_list", "instagram_basic", "instagram_manage_insights"];
+      const missing = required.filter((p) => !granted.has(p));
+
+      return {
+        status: "reauth_required",
+        loginUrl: this.buildLoginUrl(
+          `ig_reauth_${Date.now()}`,
+          true 
+        ),
+        missingPermissions: missing,
+      };
+    }
+
+    const me = await this.client.getMe(accessToken);
+
+    return {
+      status: "ok",
+      data: me,
+    };
+  }
+
+  async resolveCandidatesOrReauth(
+    accessToken: string
+  ): Promise<
+    | { status: "ok"; candidates: IgCandidate[] }
+    | InstagramAuthReauthRequired
+  > {
+    const granted = await this.client.getGrantedPermissions(accessToken);
+
+    if (!this.client.hasRequiredPermissions(granted)) {
+      const required = ["pages_show_list", "instagram_basic", "instagram_manage_insights"];
+      const missing = required.filter((p) => !granted.has(p));
+
+      return {
+        status: "reauth_required",
+        loginUrl: this.buildLoginUrl(`ig_reauth_${Date.now()}`, true),
+        missingPermissions: missing,
+      };
+    }
+
+    const candidates = await this.client.getCandidates(accessToken);
+
+    return {
+      status: "ok",
+      candidates,
+    };
+  }
+
+  async getMe(accessToken: string) {
     return this.client.getMe(accessToken);
+  }
+
+  async getCandidates(accessToken: string) {
+    return this.client.getCandidates(accessToken);
   }
 }

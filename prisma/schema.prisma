@@ -43,9 +43,12 @@ model User {
   // ✅ refresh tokens (sessão do app)
   refreshTokens RefreshToken[]
 
-  // ✅ NOVO: posts e métricas por post (backfill)
+  // ✅ Posts / backfill
   instagramPosts        InstagramPost[]
   instagramBackfillJobs InstagramBackfillJob[]
+
+  // ✅ histórico followers diário (usado no metrics)
+  instagramFollowersDaily InstagramFollowersDaily[]
 
   @@map("User")
 }
@@ -80,12 +83,17 @@ model RefreshToken {
 // ==========================
 // 📷 INSTAGRAM ACCOUNT
 // ==========================
+// ✅ AJUSTE CRÍTICO PARA MULTI-CONTA:
+// - remove @unique global em instagramId
+// - usa unique composto (userId, instagramId)
 //
 model InstagramAccount {
-  id                String  @id @default(uuid())
-  instagramId       String  @unique
+  id String @id @default(uuid())
+
+  // id do usuário IG (Graph)
+  instagramId       String
   instagramUserName String?
-  accountType       String?
+  accountType       String? // BUSINESS | CREATOR | etc
   facebookPageId    String?
 
   accessToken          String?
@@ -107,10 +115,15 @@ model InstagramAccount {
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  // ✅ NOVO: Jobs de backfill por conta (suporta multi-conta por usuário)
+  // ✅ Posts pertencem a uma conta específica
+  posts InstagramPost[]
+
+  // ✅ Jobs de backfill por conta
   backfillJobs InstagramBackfillJob[]
 
+  @@unique([userId, instagramId], name: "userId_instagramId")
   @@index([userId])
+  @@index([instagramId])
   @@map("InstagramAccounts")
 }
 
@@ -186,15 +199,47 @@ model MetricsSnapshot {
 
 //
 // ==========================
-// ✅ NOVO: POSTS DO INSTAGRAM (CATÁLOGO)
+// ✅ NOVO: FOLLOWERS DIÁRIO (para série no gráfico)
 // ==========================
+// (você usa prisma.instagramFollowersDaily no controller)
+//
+model InstagramFollowersDaily {
+  id String @id @default(uuid())
+
+  userId   String
+  igUserId String
+
+  day       DateTime @db.Date
+  followers Int      @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ==========================
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, igUserId, day], name: "userId_igUserId_day")
+  @@index([userId, igUserId, day])
+  @@map("InstagramFollowersDaily")
+}
+
+//
+// ==========================
+// ✅ POSTS DO INSTAGRAM (CATÁLOGO)
+// ==========================
+// ✅ AJUSTE CRÍTICO:
+// - post agora pertence a UMA InstagramAccount
+// - igMediaId NÃO é unique global, e sim por (instagramAccountId, igMediaId)
 //
 model InstagramPost {
-  id     String @id @default(uuid())
-  userId String
+  id String @id @default(uuid())
+
+  userId             String
+  instagramAccountId String
 
   // id do post na Graph API
-  igMediaId String @unique
+  igMediaId String
 
   mediaType   String?
   publishedAt DateTime
@@ -204,22 +249,29 @@ model InstagramPost {
   likeCount     Int @default(0)
   commentsCount Int @default(0)
 
+  // opcional: thumbs/cache
+  thumb String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   // ==========================
 
-  user    User                        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user             User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  instagramAccount InstagramAccount @relation(fields: [instagramAccountId], references: [id], onDelete: Cascade)
+
   metrics InstagramPostMetric[]
   results InstagramPostInsightResult[]
 
+  @@unique([instagramAccountId, igMediaId], name: "instagramAccountId_igMediaId")
   @@index([userId, publishedAt])
+  @@index([instagramAccountId, publishedAt])
   @@map("InstagramPosts")
 }
 
 //
 // ==========================
-// ✅ NOVO: MÉTRICAS DO POST (INSIGHTS)
+// ✅ MÉTRICAS DO POST (INSIGHTS)
 // ==========================
 //
 model InstagramPostMetric {
@@ -250,11 +302,9 @@ model InstagramPostMetric {
 
 //
 // ==========================
-// ✅ NOVO: RESULTADO DO MOTOR (POS/NEG/ESTÁVEL + JSON)
+// ✅ RESULTADO DO MOTOR (POS/NEG/ESTÁVEL + JSON)
 // ==========================
-// ✅ AJUSTE IMPORTANTE:
 // - permitir múltiplos resultados por post (1 por baselineWindowDays)
-// - criar unique composto (postId + baselineWindowDays)
 //
 model InstagramPostInsightResult {
   id String @id @default(uuid())
@@ -277,7 +327,6 @@ model InstagramPostInsightResult {
 
   post InstagramPost @relation(fields: [postId], references: [id], onDelete: Cascade)
 
-  // ✅ agora sim o upsert por (postId, baselineWindowDays) funciona
   @@unique([postId, baselineWindowDays], name: "postId_baselineWindowDays")
   @@index([postId, baselineWindowDays])
   @@map("InstagramPostInsightResults")
@@ -285,15 +334,17 @@ model InstagramPostInsightResult {
 
 //
 // ==========================
-// ✅ NOVO: JOB DE BACKFILL (FILA NO POSTGRES)
+// ✅ JOB DE BACKFILL (FILA NO POSTGRES)
 // ==========================
+// ✅ AJUSTE:
+// - instagramAccountId deveria ser obrigatório p/ multi-conta.
+//   Mantive opcional por compatibilidade, mas recomendo tornar NOT NULL depois.
 //
 model InstagramBackfillJob {
   id String @id @default(uuid())
 
   userId String
 
-  // ✅ importante: job pode ser por conta específica
   instagramAccountId String?
 
   status String  @default("queued") // queued|running|done|error
