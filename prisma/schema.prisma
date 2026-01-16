@@ -34,8 +34,9 @@ model User {
 
   // ==========================
 
-  instagramAccounts InstagramAccount[]
-  youtubeAccounts   YouTubeAccount[]
+  instagramAccounts   InstagramAccount[]
+  youtubeAccounts     YouTubeAccount[]
+  instagramCandidates InstagramCandidate[] // ✅ pendentes pós OAuth
 
   // ✅ histórico de métricas (diário)
   metricsSnapshots MetricsSnapshot[]
@@ -81,11 +82,60 @@ model RefreshToken {
 
 //
 // ==========================
+// ✅ INSTAGRAM CANDIDATES (PÓS OAUTH, ANTES DE SELECIONAR)
+// ==========================
+// Guarda as páginas/contas possíveis que vieram do OAuth.
+// O front usa isso para mostrar a lista e o usuário escolher qual conectar.
+//
+model InstagramCandidate {
+  id String @id @default(uuid())
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // ✅ id que o front usa pra selecionar (ex: igsel_xxx)
+  selectionId String
+
+  // ✅ IG user id (Graph)
+  igUserId String
+
+  // username do IG (quando disponível)
+  username String?
+
+  // BUSINESS | CREATOR | etc (quando disponível)
+  accountType String?
+
+  // página que “carrega” a conexão
+  facebookPageId   String
+  facebookPageName String?
+
+  // token da página (necessário para endpoints IG)
+  pageAccessToken String
+
+  // de onde veio (instagram_business_account | connected_instagram_account)
+  source String
+
+  // ✅ quando confirmar, a gente pode apontar pra conta conectada
+  instagramAccountId String?
+  instagramAccount   InstagramAccount? @relation(fields: [instagramAccountId], references: [id], onDelete: SetNull)
+
+  // controle
+  createdAt  DateTime  @default(now())
+  selectedAt DateTime?
+
+  // ✅ importante: evita conflito global de selectionId entre usuários/testes
+  @@unique([userId, selectionId], name: "userId_selectionId")
+  @@index([userId, createdAt])
+  @@index([userId, selectionId, createdAt])
+  @@map("InstagramCandidates")
+}
+
+//
+// ==========================
 // 📷 INSTAGRAM ACCOUNT
 // ==========================
-// ✅ AJUSTE CRÍTICO PARA MULTI-CONTA:
-// - remove @unique global em instagramId
-// - usa unique composto (userId, instagramId)
+// ✅ MULTI-CONTA:
+// - unique composto (userId, instagramId)
 //
 model InstagramAccount {
   id String @id @default(uuid())
@@ -120,6 +170,9 @@ model InstagramAccount {
 
   // ✅ Jobs de backfill por conta
   backfillJobs InstagramBackfillJob[]
+
+  // ✅ candidates ligados (opcional)
+  candidates InstagramCandidate[]
 
   @@unique([userId, instagramId], name: "userId_instagramId")
   @@index([userId])
@@ -199,9 +252,7 @@ model MetricsSnapshot {
 
 //
 // ==========================
-// ✅ NOVO: FOLLOWERS DIÁRIO (para série no gráfico)
-// ==========================
-// (você usa prisma.instagramFollowersDaily no controller)
+// ✅ FOLLOWERS DIÁRIO (para série no gráfico)
 //
 model InstagramFollowersDaily {
   id String @id @default(uuid())
@@ -228,9 +279,8 @@ model InstagramFollowersDaily {
 // ==========================
 // ✅ POSTS DO INSTAGRAM (CATÁLOGO)
 // ==========================
-// ✅ AJUSTE CRÍTICO:
-// - post agora pertence a UMA InstagramAccount
-// - igMediaId NÃO é unique global, e sim por (instagramAccountId, igMediaId)
+// - post pertence a UMA InstagramAccount
+// - igMediaId unique por (instagramAccountId, igMediaId)
 //
 model InstagramPost {
   id String @id @default(uuid())
@@ -303,8 +353,6 @@ model InstagramPostMetric {
 //
 // ==========================
 // ✅ RESULTADO DO MOTOR (POS/NEG/ESTÁVEL + JSON)
-// ==========================
-// - permitir múltiplos resultados por post (1 por baselineWindowDays)
 //
 model InstagramPostInsightResult {
   id String @id @default(uuid())
@@ -315,7 +363,6 @@ model InstagramPostInsightResult {
   verdict String // positive | negative | stable
   score   Float?
 
-  // tudo em JSON pra evoluir sem migrar toda hora
   evidence Json
   why      Json
   improve  Json
@@ -336,16 +383,15 @@ model InstagramPostInsightResult {
 // ==========================
 // ✅ JOB DE BACKFILL (FILA NO POSTGRES)
 // ==========================
-// ✅ AJUSTE:
-// - instagramAccountId deveria ser obrigatório p/ multi-conta.
-//   Mantive opcional por compatibilidade, mas recomendo tornar NOT NULL depois.
+// ✅ AGORA OBRIGATÓRIO: instagramAccountId
+// (multi-conta exige isso pra não misturar posts)
 //
 model InstagramBackfillJob {
   id String @id @default(uuid())
 
   userId String
 
-  instagramAccountId String?
+  instagramAccountId String
 
   status String  @default("queued") // queued|running|done|error
   cursor String?
@@ -364,7 +410,7 @@ model InstagramBackfillJob {
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  instagramAccount InstagramAccount? @relation(fields: [instagramAccountId], references: [id], onDelete: SetNull)
+  instagramAccount InstagramAccount @relation(fields: [instagramAccountId], references: [id], onDelete: Cascade)
 
   @@index([userId, status, createdAt])
   @@index([instagramAccountId, status, createdAt])

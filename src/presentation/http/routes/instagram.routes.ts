@@ -113,6 +113,87 @@ instagramRouter.get("/status", authMiddleware, async (req, res) => {
 });
 
 /**
+ * ✅ NOVO: Candidates para o usuário escolher a página/conta IG
+ *
+ * O frontend pode chamar em rotas diferentes (variações/legado).
+ * Todas apontam pro mesmo handler pra evitar 404.
+ *
+ * @openapi
+ * /api/instagram/candidates:
+ *   get:
+ *     tags:
+ *       - Instagram
+ *     summary: Lista candidates (páginas/contas) para o usuário escolher após o callback
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: selectionId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: ID temporário criado no callback (usado para listar candidatos)
+ *     responses:
+ *       200:
+ *         description: Lista de candidates retornada
+ *       400:
+ *         description: selectionId ausente/inválido
+ *       401:
+ *         description: Não autenticado
+ */
+const candidatesHandler = async (req: any, res: any) => {
+  res.setHeader("Cache-Control", "no-store");
+  await controller.candidates(req, res);
+};
+
+instagramRouter.get("/candidates", authMiddleware, candidatesHandler);
+instagramRouter.get("/pages", authMiddleware, candidatesHandler);
+instagramRouter.get("/accounts/candidates", authMiddleware, candidatesHandler);
+instagramRouter.get("/ig-candidates", authMiddleware, candidatesHandler);
+
+/**
+ * ✅ NOVO: confirma a seleção do candidate escolhido no frontend
+ *
+ * @openapi
+ * /api/instagram/confirm:
+ *   post:
+ *     tags:
+ *       - Instagram
+ *     summary: Confirma seleção e persiste a conta/token necessários
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               selectionId:
+ *                 type: string
+ *               selections:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     igUserId:
+ *                       type: string
+ *                     facebookPageId:
+ *                       type: string
+ *     responses:
+ *       200:
+ *         description: Seleção confirmada
+ *       400:
+ *         description: Payload inválido
+ *       401:
+ *         description: Não autenticado
+ */
+instagramRouter.post("/confirm", authMiddleware, async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  await controller.confirm(req, res);
+});
+
+/**
  * @openapi
  * /api/instagram/disconnect:
  *   post:
@@ -241,8 +322,11 @@ instagramRouter.get("/posts", authMiddleware, async (req, res) => {
   const from = typeof req.query.from === "string" ? req.query.from.trim() : "";
   const to = typeof req.query.to === "string" ? req.query.to.trim() : "";
   const type = typeof req.query.type === "string" ? req.query.type.trim() : "";
-  const limitRaw = typeof req.query.limit === "string" ? Number(req.query.limit) : undefined;
-  const limit = Number.isFinite(limitRaw) ? Math.min(200, Math.max(1, limitRaw!)) : 50;
+  const limitRaw =
+    typeof req.query.limit === "string" ? Number(req.query.limit) : undefined;
+  const limit = Number.isFinite(limitRaw)
+    ? Math.min(200, Math.max(1, limitRaw!))
+    : 50;
 
   const where: any = { userId };
   if (type) where.mediaType = type;

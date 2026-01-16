@@ -20,7 +20,7 @@ export interface InstagramLoginResult {
   username: string;
   accountType: string;
 
-  accessToken: string; // preferir pageAccessToken quando existir
+  accessToken: string; // para uso interno/retorno (preferir pageAccessToken quando existir)
   expiresAt?: Date | null;
 
   facebookPageId?: string | null;
@@ -79,7 +79,6 @@ export class CompleteIgLoginUseCase {
   ========================= */
 
   private static readonly pending = new Map<string, PendingSelection>();
-
   private static readonly ttlMs = Number(process.env.IG_LOGIN_CHOOSE_TTL_MS ?? 10 * 60 * 1000);
 
   private static cleanupExpired() {
@@ -91,12 +90,32 @@ export class CompleteIgLoginUseCase {
 
   private static createSelectionId(userId: string) {
     const nonce = randomBytes(18).toString("hex");
-    // id curto e difícil de adivinhar
     const hash = createHash("sha256")
       .update(`${userId}|${Date.now()}|${nonce}`)
       .digest("hex")
       .slice(0, 32);
     return `igsel_${hash}`;
+  }
+
+  private static assertPendingOrThrow(selectionId: string, userId: string) {
+    this.cleanupExpired();
+
+    const pending = this.pending.get(selectionId);
+    if (!pending) {
+      throw new Error("Seleção expirada ou inválida. Refaça o login do Instagram.");
+    }
+
+    if (pending.userId !== userId) {
+      throw new Error("Seleção não pertence a este usuário.");
+    }
+
+    const isExpired = Date.now() - pending.createdAt > this.ttlMs;
+    if (isExpired) {
+      this.pending.delete(selectionId);
+      throw new Error("Seleção expirada. Refaça o login do Instagram.");
+    }
+
+    return pending;
   }
 
   /* =========================
@@ -126,7 +145,6 @@ export class CompleteIgLoginUseCase {
       throw new Error("userId é obrigatório");
     }
 
-    // limpa expirados
     CompleteIgLoginUseCase.cleanupExpired();
 
     /* =========================
@@ -141,7 +159,6 @@ export class CompleteIgLoginUseCase {
 
     /* =========================
        3) Resolver candidates OU reauth
-       (você precisa ter adicionado auth.resolveCandidatesOrReauth)
     ========================= */
     // @ts-expect-error: se a interface ainda não tiver esse método, adicione nele também
     const resolved = await this.auth.resolveCandidatesOrReauth(longToken);
@@ -157,7 +174,6 @@ export class CompleteIgLoginUseCase {
     const candidatesRaw = resolved.candidates ?? [];
 
     if (!candidatesRaw.length) {
-      // Mensagem clara: o token não enxerga Pages com IG conectado
       throw new Error(
         "Nenhuma conta do Instagram foi encontrada para este login. " +
           "Verifique se o Instagram é Professional (Business/Creator) e está vinculado a uma Página do Facebook " +
@@ -204,6 +220,38 @@ export class CompleteIgLoginUseCase {
   }
 
   /* =========================
+     STEP A.1: GET candidates by selectionId
+  ========================= */
+
+  /**
+   * ✅ Novo:
+   * O frontend pode chamar /candidates depois do callback com selectionId
+   * para re-renderizar a lista sem repetir login.
+   */
+  async getCandidates(params: {
+    selectionId: string;
+    userId: string;
+  }): Promise<InstagramCandidateDTO[]> {
+    const selectionId = String(params.selectionId ?? "").trim();
+    const userId = String(params.userId ?? "").trim();
+
+    if (!selectionId) throw new Error("selectionId é obrigatório");
+    if (!userId) throw new Error("userId é obrigatório");
+
+    const pending = CompleteIgLoginUseCase.assertPendingOrThrow(selectionId, userId);
+
+    // devolve apenas DTO (sem tokens)
+    return pending.candidates.map((c) => ({
+      igUserId: c.igUserId,
+      username: c.username,
+      accountType: c.accountType,
+      facebookPageId: c.facebookPageId,
+      facebookPageName: c.facebookPageName,
+      source: c.source,
+    }));
+  }
+
+  /* =========================
      STEP B: confirm -> persist 1..N
   ========================= */
 
@@ -218,35 +266,17 @@ export class CompleteIgLoginUseCase {
     userId: string;
     selections: InstagramConfirmSelectionInput;
   }): Promise<InstagramLoginResult[]> {
-    const { selectionId, userId, selections } = params;
+    const selectionId = String(params.selectionId ?? "").trim();
+    const userId = String(params.userId ?? "").trim();
+    const selections = params.selections;
 
-    if (!selectionId || selectionId.trim().length === 0) {
-      throw new Error("selectionId é obrigatório");
-    }
-    if (!userId || userId.trim().length === 0) {
-      throw new Error("userId é obrigatório");
-    }
+    if (!selectionId) throw new Error("selectionId é obrigatório");
+    if (!userId) throw new Error("userId é obrigatório");
     if (!Array.isArray(selections) || selections.length === 0) {
       throw new Error("Selecione ao menos uma conta para conectar");
     }
 
-    CompleteIgLoginUseCase.cleanupExpired();
-
-    const pending = CompleteIgLoginUseCase.pending.get(selectionId);
-    if (!pending) {
-      throw new Error("Seleção expirada ou inválida. Refaça o login do Instagram.");
-    }
-
-    if (pending.userId !== userId) {
-      throw new Error("Seleção não pertence a este usuário.");
-    }
-
-    // TTL check
-    const isExpired = Date.now() - pending.createdAt > CompleteIgLoginUseCase.ttlMs;
-    if (isExpired) {
-      CompleteIgLoginUseCase.pending.delete(selectionId);
-      throw new Error("Seleção expirada. Refaça o login do Instagram.");
-    }
+    const pending = CompleteIgLoginUseCase.assertPendingOrThrow(selectionId, userId);
 
     // Index candidates
     const byKey = new Map<string, PendingSelection["candidates"][number]>();
@@ -257,8 +287,8 @@ export class CompleteIgLoginUseCase {
     // dedup selections
     const uniq = new Map<string, { igUserId: string; facebookPageId: string }>();
     for (const s of selections) {
-      const igUserId = String(s.igUserId ?? "").trim();
-      const facebookPageId = String(s.facebookPageId ?? "").trim();
+      const igUserId = String((s as any)?.igUserId ?? "").trim();
+      const facebookPageId = String((s as any)?.facebookPageId ?? "").trim();
       if (!igUserId || !facebookPageId) continue;
       uniq.set(`${igUserId}|${facebookPageId}`, { igUserId, facebookPageId });
     }
@@ -279,30 +309,25 @@ export class CompleteIgLoginUseCase {
 
       const username = String(c.username ?? "").trim();
       const accountType = String(c.accountType ?? "").trim();
-      const pageAccessToken = String(c.pageAccessToken ?? "").trim();
+      const pageAccessToken = String((c as any).pageAccessToken ?? "").trim();
 
       if (!username) throw new Error(`username vazio para igUserId=${igUserId}`);
       if (!accountType) throw new Error(`accountType vazio para igUserId=${igUserId}`);
       if (!pageAccessToken) throw new Error(`pageAccessToken vazio para igUserId=${igUserId}`);
 
-      // ✅ Para métricas e insights, PageAccessToken é o ideal
-      const tokenToPersist = pageAccessToken ?? pending.longToken;
-
+      // ✅ Persistência: salva longToken + pageAccessToken + facebookPageId
       await this.tokenStore.saveOrUpdate({
         userId,
         igUserId,
         username,
         accountType,
 
-        // tokens
         accessToken: pending.longToken,
         pageAccessToken,
         facebookPageId,
 
         expiresAt: pending.expiresAt ?? null,
         lastRefreshedAt: new Date(),
-
-        // ✅ front depende disso
         isConnected: true,
       });
 
@@ -310,7 +335,7 @@ export class CompleteIgLoginUseCase {
         igUserId,
         username,
         accountType,
-        accessToken: tokenToPersist,
+        accessToken: pageAccessToken || pending.longToken,
         expiresAt: pending.expiresAt ?? null,
         facebookPageId,
         pageAccessToken,

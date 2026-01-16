@@ -1,3 +1,4 @@
+// src/presentation/http/controllers/InstagramAuthController.ts
 import { Request, Response } from "express";
 import crypto from "crypto";
 import axios from "axios";
@@ -9,6 +10,24 @@ import {
   InstagramLoginChooseRequired,
 } from "../../../application/instagram/CompleteIgLoginUseCase";
 import { prisma } from "../../../infrastructure/db/prismaClient";
+
+// ✅ helpers extraídos (http/instagram)
+import { ymd, parseYmd, listDays } from "../instagram/instagramDateUtils";
+import {
+  toFiniteNumber,
+  mapInsightByDayRobust,
+} from "../instagram/instagramInsightsMapper";
+import {
+  setIgLoginCookie,
+  getIgLoginCookie,
+  clearIgLoginCookie,
+} from "../instagram/instagramCookies";
+import { signState, safeParseState } from "../instagram/instagramState";
+import { isInstagramTokenInvalid } from "../instagram/instagramErrors";
+import {
+  getFollowersSeriesFromDb,
+  saveTodayFollowersSnapshot,
+} from "../instagram/instagramFollowersRepository";
 
 /* =========================
    Tipos (Graph API)
@@ -47,98 +66,23 @@ type IgInsightsResponse = {
   data: IgInsightRow[];
 };
 
+/**
+ * ✅ Candidato encontrado para o usuário escolher no frontend
+ * - Pode ser Business (instagram_business_account) ou Creator (connected_instagram_account)
+ */
+export type IgCandidate = {
+  igUserId: string;
+  username: string;
+  accountType: string;
+  facebookPageId: string;
+  facebookPageName?: string;
+  pageAccessToken: string;
+  source: "instagram_business_account" | "connected_instagram_account";
+};
+
 /* =========================
-   Helpers de data
+   Auth helper
 ========================= */
-
-function ymd(d: Date) {
-  return d.toISOString().slice(0, 10);
-}
-
-function parseYmd(ymdStr: string): Date {
-  return new Date(`${ymdStr}T00:00:00.000Z`);
-}
-
-function listDays(from: string, to: string): string[] {
-  const start = parseYmd(from);
-  const end = parseYmd(to);
-
-  const days: string[] = [];
-  for (let d = new Date(start); d <= end; d.setUTCDate(d.getUTCDate() + 1)) {
-    days.push(ymd(d));
-  }
-  return days;
-}
-
-/**
- * Graph API às vezes devolve números em formatos como:
- * - 12
- * - "12"
- * - { value: 12 }
- * - { value: { value: 12 } }
- * - { total_value: { value: 12 } }
- * - { values: [{ value: 12 }] }
- */
-function toFiniteNumber(v: any): number {
-  const unwrap = (x: any): any => {
-    if (x == null) return 0;
-
-    if (typeof x === "number" || typeof x === "string") return x;
-
-    if (typeof x === "object") {
-      if ("total_value" in x) return unwrap((x as any).total_value);
-      if ("value" in x) return unwrap((x as any).value);
-
-      if (Array.isArray((x as any).values) && (x as any).values.length > 0) {
-        const first = (x as any).values[0];
-        return unwrap(first?.value ?? first);
-      }
-
-      return 0;
-    }
-
-    return 0;
-  };
-
-  const n = Number(unwrap(v));
-  return Number.isFinite(n) ? n : 0;
-}
-
-/**
- * ✅ Mapper robusto por dia
- * - usa values[] quando existe
- * - se não existir values, joga total no último dia (fallback)
- */
-function mapInsightByDayRobust(
-  insightsData: any[],
-  metricName: string,
-  days: string[],
-  fallbackValue = 0
-): Record<string, number> {
-  const out: Record<string, number> = {};
-  for (const d of days) out[d] = 0;
-
-  const item = insightsData?.find((x: any) => x?.name === metricName);
-  if (!item) return out;
-
-  const values = item?.values;
-  if (Array.isArray(values) && values.length > 0) {
-    for (const v of values) {
-      const endTime: string | undefined = v?.end_time;
-      if (!endTime) continue;
-
-      const day = endTime.slice(0, 10);
-      out[day] = toFiniteNumber(v?.value);
-    }
-    return out;
-  }
-
-  const total = toFiniteNumber(item?.total_value ?? item?.value ?? fallbackValue);
-  const lastDay = days[days.length - 1];
-  out[lastDay] = total;
-
-  return out;
-}
 
 function getAuthenticatedUserId(req: Request): string | null {
   const anyReq = req as any;
@@ -150,75 +94,23 @@ function getAuthenticatedUserId(req: Request): string | null {
     anyReq?.userId ||
     null;
 
-  if (typeof fromUser === "string" && fromUser.trim().length > 0) return fromUser.trim();
+  if (typeof fromUser === "string" && fromUser.trim().length > 0)
+    return fromUser.trim();
   if (typeof fromUser === "number") return String(fromUser);
 
   const fromHeader = req.header("x-user-id");
-  if (typeof fromHeader === "string" && fromHeader.trim().length > 0) return fromHeader.trim();
+  if (typeof fromHeader === "string" && fromHeader.trim().length > 0)
+    return fromHeader.trim();
 
   return null;
 }
 
-const IG_LOGIN_UID_COOKIE = "ig_login_uid";
-
-function setIgLoginCookie(res: Response, userId: string) {
-  res.cookie(IG_LOGIN_UID_COOKIE, userId, {
-    httpOnly: true,
-    sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
-    maxAge: 10 * 60 * 1000,
-    path: "/",
-  });
-}
-
-function getIgLoginCookie(req: Request): string | null {
-  const anyReq = req as any;
-  const v = anyReq?.cookies?.[IG_LOGIN_UID_COOKIE];
-  return typeof v === "string" && v.trim().length > 0 ? v.trim() : null;
-}
-
-function clearIgLoginCookie(res: Response) {
-  res.clearCookie(IG_LOGIN_UID_COOKIE, { path: "/" });
-}
-
-const STATE_SIGN_SECRET =
-  process.env.IG_STATE_SIGN_SECRET || process.env.JWT_SECRET || "dev_secret_change_me";
-
-function signState(payload: string) {
-  const h = crypto.createHmac("sha256", STATE_SIGN_SECRET).update(payload).digest("hex");
-  return `${payload}.${h}`;
-}
-
-function verifyState(signed: string): string | null {
-  const idx = signed.lastIndexOf(".");
-  if (idx <= 0) return null;
-
-  const payload = signed.slice(0, idx);
-  const sig = signed.slice(idx + 1);
-
-  const expected = crypto.createHmac("sha256", STATE_SIGN_SECRET).update(payload).digest("hex");
-  if (sig.length !== expected.length) return null;
-
-  const ok = crypto.timingSafeEqual(Buffer.from(sig, "utf8"), Buffer.from(expected, "utf8"));
-  return ok ? payload : null;
-}
-
-function safeParseState(state: string): { uid?: string; returnTo?: string } {
-  const verified = verifyState(state);
-  if (!verified) return {};
-
-  try {
-    const parsed = JSON.parse(verified);
-    return {
-      uid: parsed?.uid != null ? String(parsed.uid) : undefined,
-      returnTo: typeof parsed?.returnTo === "string" ? String(parsed.returnTo) : undefined,
-    };
-  } catch {
-    return {};
-  }
-}
+/* =========================
+   Params helpers
+========================= */
 
 function parseRedirectParam(v: unknown): boolean {
+  // ✅ default = true (callback do FB)
   if (v === undefined || v === null || v === "") return true;
 
   if (typeof v === "boolean") return v;
@@ -233,89 +125,144 @@ function parseRedirectParam(v: unknown): boolean {
   return true;
 }
 
-function isInstagramTokenInvalid(err: any): boolean {
-  const data = err?.response?.data;
-  const code = data?.error?.code;
-  const subcode = data?.error?.error_subcode;
-  const message = String(data?.error?.message ?? "").toLowerCase();
-
-  if (code === 190) return true;
-  if (typeof subcode === "number" && [458, 459, 460, 463, 464, 467].includes(subcode)) return true;
-  if (message.includes("invalid oauth access token")) return true;
-  if (message.includes("session has expired")) return true;
-  if (message.includes("has been invalidated")) return true;
-
-  return false;
+function safeJson(res: Response, status: number, body: any) {
+  if (res.headersSent) return;
+  res.status(status).json(body);
 }
 
-/* =========================
-   Followers daily helpers (DB)
-========================= */
+function safeRedirect(res: Response, status: number, url: string) {
+  if (res.headersSent) return;
+  res.redirect(status, url);
+}
 
-async function getFollowersSeriesFromDb(opts: {
-  userId: string;
-  igUserId: string;
-  days: string[];
-  fallbackFollowers: number;
-}): Promise<{ followersByDay: Record<string, number>; hasHistory: boolean }> {
-  const { userId, igUserId, days, fallbackFollowers } = opts;
+function buildFrontRedirect(opts: {
+  returnTo: string;
+  params: Record<string, string>;
+}) {
+  const frontUrl = process.env.FRONTEND_URL ?? "http://localhost:5173";
+  const { returnTo, params } = opts;
 
+  const safeReturnTo =
+    returnTo && returnTo.startsWith("/") ? returnTo : "/settings";
+  const base = `${frontUrl}${safeReturnTo}`;
+  const qs = new URLSearchParams(params);
+
+  return `${base}${base.includes("?") ? "&" : "?"}${qs.toString()}`;
+}
+
+function reminderLogSafe(message: string, obj?: any) {
   try {
-    const from = parseYmd(days[0]);
-    const to = parseYmd(days[days.length - 1]);
-
-    // @ts-ignore
-    const rows = await prisma.instagramFollowersDaily.findMany({
-      where: {
-        userId,
-        igUserId,
-        day: { gte: from, lte: to },
-      },
-      orderBy: { day: "asc" },
-      select: { day: true, followers: true },
-    });
-
-    const map: Record<string, number> = {};
-    for (const r of rows) {
-      map[ymd(new Date(r.day))] = toFiniteNumber(r.followers);
-    }
-
-    const hasHistory = rows.length > 0;
-
-    let last = hasHistory ? map[days[0]] ?? fallbackFollowers : fallbackFollowers;
-    for (const day of days) {
-      if (map[day] == null) {
-        map[day] = last;
-      } else {
-        last = map[day];
-      }
-    }
-
-    return { followersByDay: map, hasHistory };
+    if (obj !== undefined) console.log(message, obj);
+    else console.log(message);
   } catch {
-    const map: Record<string, number> = {};
-    for (const day of days) map[day] = fallbackFollowers;
-    return { followersByDay: map, hasHistory: false };
+    // noop
   }
 }
 
-async function saveTodayFollowersSnapshot(opts: { userId: string; igUserId: string; followers: number }) {
-  const { userId, igUserId, followers } = opts;
+/* =========================
+   ✅ Persistência de candidates (resolve 400 após refresh/restart)
+========================= */
+
+function normalizeCandidate(c: any): IgCandidate {
+  return {
+    igUserId: String(c?.igUserId ?? "").trim(),
+    username: String(c?.username ?? "").trim(),
+    accountType: String(c?.accountType ?? "").trim(),
+    facebookPageId: String(c?.facebookPageId ?? "").trim(),
+    facebookPageName:
+      c?.facebookPageName != null ? String(c.facebookPageName) : undefined,
+    pageAccessToken: String(c?.pageAccessToken ?? "").trim(),
+    source:
+      c?.source === "connected_instagram_account"
+        ? "connected_instagram_account"
+        : "instagram_business_account",
+  };
+}
+
+async function persistCandidatesToDb(opts: {
+  userId: string;
+  selectionId: string;
+  candidates: any[];
+}) {
+  const { userId, selectionId } = opts;
+  const candidates = Array.isArray(opts.candidates) ? opts.candidates : [];
+
+  // evita inserir lixo
+  const normalized = candidates
+    .map(normalizeCandidate)
+    .filter(
+      (c) =>
+        !!c.igUserId &&
+        !!c.facebookPageId &&
+        !!c.pageAccessToken &&
+        !!c.username
+    );
+
+  if (!selectionId || !userId || normalized.length === 0) return;
+
+  // ✅ estratégia simples e robusta:
+  // - remove registros antigos dessa selectionId
+  // - reinsere os atuais
+  // Isso elimina necessidade de unique/skipDuplicates.
+  try {
+    await prisma.instagramCandidate.deleteMany({
+      where: { userId, selectionId },
+    });
+
+    await prisma.instagramCandidate.createMany({
+      data: normalized.map((c) => ({
+        userId,
+        selectionId,
+
+        igUserId: c.igUserId,
+        username: c.username,
+        accountType: c.accountType,
+
+        facebookPageId: c.facebookPageId,
+        facebookPageName: c.facebookPageName ?? null,
+
+        pageAccessToken: c.pageAccessToken,
+        source: c.source,
+      })),
+    });
+  } catch (e: any) {
+    // não derruba o fluxo se falhar persistência
+    console.warn(
+      "[IG] persistCandidatesToDb warning:",
+      e?.message ?? e
+    );
+  }
+}
+
+async function readCandidatesFromDb(opts: {
+  userId: string;
+  selectionId: string;
+}): Promise<IgCandidate[]> {
+  const { userId, selectionId } = opts;
 
   try {
-    const today = ymd(new Date());
-    const dayDate = parseYmd(today);
-
-    // @ts-ignore
-    await prisma.instagramFollowersDaily.upsert({
-      where: {
-        userId_igUserId_day: { userId, igUserId, day: dayDate },
-      },
-      update: { followers },
-      create: { userId, igUserId, day: dayDate, followers },
+    const rows = await prisma.instagramCandidate.findMany({
+      where: { userId, selectionId },
+      orderBy: { createdAt: "desc" },
+      take: 50,
     });
-  } catch {
-    // silencioso
+
+    return rows
+      .map((r: any) =>
+        normalizeCandidate({
+          igUserId: r?.igUserId,
+          username: r?.username,
+          accountType: r?.accountType,
+          facebookPageId: r?.facebookPageId,
+          facebookPageName: r?.facebookPageName,
+          pageAccessToken: r?.pageAccessToken,
+          source: r?.source,
+        })
+      )
+      .filter((c) => !!c.igUserId && !!c.facebookPageId && !!c.pageAccessToken);
+  } catch (e: any) {
+    console.warn("[IG] readCandidatesFromDb warning:", e?.message ?? e);
+    return [];
   }
 }
 
@@ -367,14 +314,15 @@ async function fetchDailyInteractionsByPosts(opts: {
   let after: string | undefined = undefined;
 
   for (let guard = 0; guard < 30; guard++) {
-    const mediaRes: AxiosResponse<IgMediaResponse> = await graph.get<IgMediaResponse>(`/${igUserId}/media`, {
-      params: {
-        fields: "id,timestamp,like_count,comments_count",
-        limit: 100,
-        after,
-        access_token: accessToken,
-      },
-    });
+    const mediaRes: AxiosResponse<IgMediaResponse> =
+      await graph.get<IgMediaResponse>(`/${igUserId}/media`, {
+        params: {
+          fields: "id,timestamp,like_count,comments_count",
+          limit: 100,
+          after,
+          access_token: accessToken,
+        },
+      });
 
     const data: IgMediaItem[] = mediaRes.data?.data ?? [];
     allMedia.push(...data);
@@ -417,17 +365,19 @@ async function fetchDailyInteractionsByPosts(opts: {
 
   await asyncPool(6, inRange, async (m) => {
     try {
-      const insightsRes: AxiosResponse<IgInsightsResponse> = await graph.get<IgInsightsResponse>(`/${m.id}/insights`, {
-        params: {
-          metric: "shares,saved",
-          access_token: accessToken,
-        },
-      });
+      const insightsRes: AxiosResponse<IgInsightsResponse> =
+        await graph.get<IgInsightsResponse>(`/${m.id}/insights`, {
+          params: {
+            metric: "shares,saved",
+            access_token: accessToken,
+          },
+        });
 
       const arr = insightsRes.data?.data ?? [];
 
       const pickValue = (row: IgInsightRow): number => {
-        const v = row?.values?.[0]?.value ?? row?.total_value ?? row?.value ?? row ?? 0;
+        const v =
+          row?.values?.[0]?.value ?? row?.total_value ?? row?.value ?? row ?? 0;
         return toFiniteNumber(v);
       };
 
@@ -459,11 +409,12 @@ async function fetchDailyInteractionsByPosts(opts: {
 
 async function fetchTopContentFromDb(opts: {
   userId: string;
+  instagramAccountId: string; // ✅ filtra por conta
   from: string;
   to: string;
   followersBase: number;
 }) {
-  const { userId, from, to, followersBase } = opts;
+  const { userId, instagramAccountId, from, to, followersBase } = opts;
 
   const fromDate = parseYmd(from);
   const toDate = new Date(parseYmd(to).getTime() + 86399999);
@@ -471,6 +422,7 @@ async function fetchTopContentFromDb(opts: {
   const posts = await prisma.instagramPost.findMany({
     where: {
       userId,
+      instagramAccountId,
       publishedAt: { gte: fromDate, lte: toDate },
     },
     orderBy: { publishedAt: "desc" },
@@ -486,19 +438,19 @@ async function fetchTopContentFromDb(opts: {
 
   const items = posts
     .map((p) => {
-      const m = p.metrics?.[0];
+      const m = (p as any).metrics?.[0];
 
       const likes = toFiniteNumber((p as any).likeCount);
       const comments = toFiniteNumber((p as any).commentsCount);
 
-      const reach = toFiniteNumber((m as any)?.reach);
-      const shares = toFiniteNumber((m as any)?.shares);
-      const saved = toFiniteNumber((m as any)?.saves);
+      const reach = toFiniteNumber(m?.reach);
+      const shares = toFiniteNumber(m?.shares);
+      const saved = toFiniteNumber(m?.saves);
       const totalInteractions =
-        toFiniteNumber((m as any)?.totalInteractions) || likes + comments + shares + saved;
+        toFiniteNumber(m?.totalInteractions) || likes + comments + shares + saved;
 
-      const plays = toFiniteNumber((m as any)?.plays);
-      const videoViews = toFiniteNumber((m as any)?.videoViews);
+      const plays = toFiniteNumber(m?.plays);
+      const videoViews = toFiniteNumber(m?.videoViews);
       const views = plays || videoViews || null;
 
       return {
@@ -522,7 +474,9 @@ async function fetchTopContentFromDb(opts: {
         },
       };
     })
-    .sort((a, b) => (b.insights?.totalInteractions ?? 0) - (a.insights?.totalInteractions ?? 0))
+    .sort(
+      (a, b) => (b.insights?.totalInteractions ?? 0) - (a.insights?.totalInteractions ?? 0)
+    )
     .slice(0, 6);
 
   return items;
@@ -541,13 +495,15 @@ async function fetchTopContent(opts: {
   const fromTs = parseYmd(from).getTime();
   const toTs = parseYmd(to).getTime() + 86399999;
 
-  const mediaRes: AxiosResponse<IgMediaResponse> = await graph.get<IgMediaResponse>(`/${igUserId}/media`, {
-    params: {
-      fields: "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count",
-      limit: 50,
-      access_token: accessToken,
-    },
-  });
+  const mediaRes: AxiosResponse<IgMediaResponse> =
+    await graph.get<IgMediaResponse>(`/${igUserId}/media`, {
+      params: {
+        fields:
+          "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count",
+        limit: 50,
+        access_token: accessToken,
+      },
+    });
 
   const data = mediaRes.data?.data ?? [];
   const denom = Math.max(1, toFiniteNumber(followersBase));
@@ -594,17 +550,19 @@ async function fetchTopContent(opts: {
   const enriched = await Promise.all(
     items.map(async (it) => {
       try {
-        const insightsRes: AxiosResponse<IgInsightsResponse> = await graph.get<IgInsightsResponse>(`/${it.id}/insights`, {
-          params: {
-            metric: "plays,video_views,reach,total_interactions,shares,saved",
-            access_token: accessToken,
-          },
-        });
+        const insightsRes: AxiosResponse<IgInsightsResponse> =
+          await graph.get<IgInsightsResponse>(`/${it.id}/insights`, {
+            params: {
+              metric: "plays,video_views,reach,total_interactions,shares,saved",
+              access_token: accessToken,
+            },
+          });
 
         const arr = insightsRes.data?.data ?? [];
 
         const pickValue = (row: IgInsightRow): number | null => {
-          const v = row?.values?.[0]?.value ?? row?.total_value ?? row?.value ?? row ?? null;
+          const v =
+            row?.values?.[0]?.value ?? row?.total_value ?? row?.value ?? row ?? null;
           const n = toFiniteNumber(v);
           return Number.isFinite(n) ? n : null;
         };
@@ -643,7 +601,10 @@ async function fetchTopContent(opts: {
    Backfill enqueue (multi-conta)
 ========================= */
 
-async function enqueueInstagramBackfill(opts: { userId: string; instagramAccountId: string }) {
+async function enqueueInstagramBackfill(opts: {
+  userId: string;
+  instagramAccountId: string;
+}) {
   const { userId, instagramAccountId } = opts;
 
   const existing = await prisma.instagramBackfillJob.findFirst({
@@ -673,13 +634,16 @@ async function enqueueInstagramBackfill(opts: { userId: string; instagramAccount
 ========================= */
 
 function getInstagramAccountIdFromQuery(req: Request): string | null {
-  const v = req.query.instagramAccountId ?? req.query.accountId;
+  const v = (req.query.instagramAccountId ?? req.query.accountId) as any;
   if (v == null) return null;
   const s = String(v).trim();
   return s.length > 0 ? s : null;
 }
 
-async function getInstagramAccountForRequest(userId: string, instagramAccountId?: string | null) {
+async function getInstagramAccountForRequest(
+  userId: string,
+  instagramAccountId?: string | null
+) {
   if (instagramAccountId) {
     return prisma.instagramAccount.findFirst({
       where: { id: instagramAccountId, userId },
@@ -687,33 +651,18 @@ async function getInstagramAccountForRequest(userId: string, instagramAccountId?
     });
   }
 
+  // ✅ preferência: conta conectada mais recente
+  const connected = await prisma.instagramAccount.findFirst({
+    where: { userId, isConnected: true },
+    orderBy: { updatedAt: "desc" },
+  });
+  if (connected) return connected;
+
+  // fallback: última atualizada
   return prisma.instagramAccount.findFirst({
     where: { userId },
     orderBy: { updatedAt: "desc" },
   });
-}
-
-/* =========================
-   Response helpers (evita headers sent)
-========================= */
-
-function safeJson(res: Response, status: number, body: any) {
-  if (res.headersSent) return;
-  res.status(status).json(body);
-}
-
-function safeRedirect(res: Response, status: number, url: string) {
-  if (res.headersSent) return;
-  res.redirect(status, url);
-}
-
-function buildFrontRedirect(opts: { returnTo: string; params: Record<string, string> }) {
-  const frontUrl = process.env.FRONTEND_URL ?? "http://localhost:5173";
-  const { returnTo, params } = opts;
-
-  const base = `${frontUrl}${returnTo.startsWith("/") ? returnTo : "/settings"}`;
-  const qs = new URLSearchParams(params);
-  return `${base}${base.includes("?") ? "&" : "?"}${qs.toString()}`;
 }
 
 /* =========================
@@ -760,10 +709,6 @@ export class InstagramAuthController {
     safeRedirect(res, 302, url);
   }
 
-  /**
-   * ✅ Callback agora NÃO salva a conta automaticamente.
-   * Ele retorna choose_required com candidates para o frontend escolher.
-   */
   async callback(req: Request, res: Response): Promise<void> {
     const code = String(req.query.code ?? "");
     const state = String(req.query.state ?? "");
@@ -802,26 +747,28 @@ export class InstagramAuthController {
     });
 
     try {
-      const result = (await this.completeLogin.execute(
-        code,
-        state ?? "",
-        userId
-      )) as InstagramLoginReauthRequired | InstagramLoginChooseRequired;
+      const result = (await this.completeLogin.execute(code, state ?? "", userId)) as
+        | InstagramLoginReauthRequired
+        | InstagramLoginChooseRequired;
 
-      // 1) reauth_required -> rerequest
       if (result?.status === "reauth_required") {
-        const missing = Array.isArray(result?.missingPermissions) ? result.missingPermissions : [];
+        const missing = Array.isArray((result as any)?.missingPermissions)
+          ? (result as any).missingPermissions
+          : [];
 
         reminderLogSafe("[IG] reauth required -> rerequest", {
           userId,
           missingPermissions: missing,
         });
 
-        const rerequestUrl = this.authService.buildLoginUrl(state, true);
+        const urlFromUseCase = (result as any)?.loginUrl
+          ? String((result as any).loginUrl)
+          : "";
+        const rerequestUrl = urlFromUseCase || this.authService.buildLoginUrl(state, true);
 
-        // ✅ se o caller não quer redirect, devolve JSON com a url
+        clearIgLoginCookie(res);
+
         if (!redirect) {
-          clearIgLoginCookie(res); // header antes da resposta
           safeJson(res, 200, {
             status: "reauth_required",
             missingPermissions: missing,
@@ -831,39 +778,42 @@ export class InstagramAuthController {
           return;
         }
 
-        // ✅ redirect
-        clearIgLoginCookie(res);
         safeRedirect(res, 302, rerequestUrl);
         return;
       }
 
-      // 2) choose_required -> envia pro front
       if (result?.status === "choose_required") {
-        // ✅ cookie pode ser limpo aqui (já temos selectionId)
         clearIgLoginCookie(res);
+
+        const selectionId = String((result as any).selectionId);
+        const candidates = Array.isArray((result as any).candidates)
+          ? (result as any).candidates
+          : [];
 
         reminderLogSafe("[IG] choose_required", {
           userId,
-          selectionId: result.selectionId,
-          candidatesCount: result.candidates?.length ?? 0,
+          selectionId,
+          candidatesCount: candidates.length,
         });
+
+        // ✅ NOVO: persistir candidates no DB para sobreviver refresh/restart
+        await persistCandidatesToDb({ userId, selectionId, candidates });
 
         if (!redirect) {
           safeJson(res, 200, {
             status: "choose_required",
-            selectionId: result.selectionId,
-            candidates: result.candidates,
+            selectionId,
+            candidates,
             returnTo,
           });
           return;
         }
 
-        // ✅ redireciona o usuário para o front já com selectionId
         const redirectUrl = buildFrontRedirect({
           returnTo,
           params: {
             instagram: "choose",
-            selectionId: String(result.selectionId),
+            selectionId,
           },
         });
 
@@ -871,8 +821,8 @@ export class InstagramAuthController {
         return;
       }
 
-      // fallback inesperado
       clearIgLoginCookie(res);
+
       if (!redirect) {
         safeJson(res, 500, { message: "Resposta inesperada no callback do Instagram" });
         return;
@@ -882,13 +832,12 @@ export class InstagramAuthController {
         returnTo,
         params: { instagram: "error", reason: "unexpected_callback_response" },
       });
+
       safeRedirect(res, 302, redirectUrl);
       return;
     } catch (err: any) {
       console.error("[IG] callback error:", err?.response?.data ?? err);
 
-      // ✅ IMPORTANTÍSSIMO:
-      // limpar cookie ANTES de responder (evita "Cannot set headers after they are sent")
       clearIgLoginCookie(res);
 
       const details = err?.response?.data ?? (err?.message ? String(err.message) : String(err));
@@ -899,13 +848,9 @@ export class InstagramAuthController {
         return;
       }
 
-      // ✅ se veio via redirect, manda pro front com erro (sem estourar headers)
       const redirectUrl = buildFrontRedirect({
         returnTo,
-        params: {
-          instagram: "error",
-          message: msg,
-        },
+        params: { instagram: "error", message: msg },
       });
 
       safeRedirect(res, 302, redirectUrl);
@@ -914,16 +859,134 @@ export class InstagramAuthController {
   }
 
   /**
-   * ✅ NOVO endpoint:
-   * Frontend chama após o usuário escolher 1..N contas.
-   *
-   * Body:
-   * {
-   *   selectionId: string,
-   *   selections: [{ igUserId: string, facebookPageId: string }, ...],
-   *   returnTo?: string,
-   *   redirect?: boolean
-   * }
+   * ✅ GET /api/instagram/candidates?selectionId=...
+   * ✅ FIX: não depende mais apenas de memória/cache do UseCase.
+   * - tenta UseCase (fluxo normal)
+   * - se falhar/expirou, busca no DB (persistido no callback)
+   */
+  async candidates(req: Request, res: Response): Promise<void> {
+    const userId = getAuthenticatedUserId(req);
+    if (!userId) {
+      safeJson(res, 401, { message: "Não autenticado" });
+      return;
+    }
+
+    const selectionId = String(req.query.selectionId ?? "").trim();
+    if (!selectionId) {
+      safeJson(res, 400, { message: "selectionId é obrigatório" });
+      return;
+    }
+
+    // 1) tenta via UseCase (pode falhar se reiniciou/expirou)
+    try {
+      const candidates = await this.completeLogin.getCandidates({ selectionId, userId });
+
+      // ✅ garante persistência mesmo se candidates só existiam em memória
+      await persistCandidatesToDb({ userId, selectionId, candidates });
+
+      safeJson(res, 200, { selectionId, candidates });
+      return;
+    } catch (err: any) {
+      // 2) fallback DB
+      const fromDb = await readCandidatesFromDb({ userId, selectionId });
+      if (fromDb.length > 0) {
+        safeJson(res, 200, { selectionId, candidates: fromDb });
+        return;
+      }
+
+      const msg =
+        err?.message ? String(err.message) : "Erro ao listar candidates";
+      safeJson(res, 400, {
+        message: msg,
+        reason: "selection_expired_or_not_found",
+      });
+      return;
+    }
+  }
+
+  /**
+   * ✅ POST /api/instagram/choose
+   * ✅ FIX TS: facebookPageId sempre string
+   */
+  async choose(req: Request, res: Response): Promise<void> {
+    const userId = getAuthenticatedUserId(req);
+    if (!userId) {
+      safeJson(res, 401, { message: "Não autenticado" });
+      return;
+    }
+
+    const selectionId = String((req.body as any)?.selectionId ?? "").trim();
+    const igUserId = String((req.body as any)?.igUserId ?? "").trim();
+    const facebookPageIdRaw = (req.body as any)?.facebookPageId;
+    const facebookPageId =
+      facebookPageIdRaw != null ? String(facebookPageIdRaw).trim() : "";
+
+    if (!selectionId) {
+      safeJson(res, 400, { message: "selectionId é obrigatório" });
+      return;
+    }
+    if (!igUserId) {
+      safeJson(res, 400, { message: "igUserId é obrigatório" });
+      return;
+    }
+
+    // ✅ IMPORTANT: o UseCase exige facebookPageId: string (obrigatório)
+    const selections = [
+      {
+        igUserId,
+        facebookPageId: facebookPageId || "",
+      },
+    ];
+
+    try {
+      const results = await this.completeLogin.confirmSelection({
+        selectionId,
+        userId,
+        selections,
+      });
+
+      const connectedAccountIds: string[] = [];
+
+      for (const r of results) {
+        const ig = String((r as any).igUserId);
+        const fb = String((r as any).facebookPageId ?? "").trim();
+
+        const acc = await prisma.instagramAccount.findFirst({
+          where: {
+            userId,
+            instagramId: ig,
+            ...(fb ? { facebookPageId: fb } : {}),
+          },
+          orderBy: { updatedAt: "desc" },
+          select: { id: true },
+        });
+
+        if (acc?.id) connectedAccountIds.push(acc.id);
+      }
+
+      for (const id of connectedAccountIds) {
+        await enqueueInstagramBackfill({ userId, instagramAccountId: id });
+      }
+
+      safeJson(res, 200, {
+        status: "ok",
+        accounts: results,
+        instagramAccountIds: connectedAccountIds,
+      });
+      return;
+    } catch (err: any) {
+      console.error("[IG] choose error:", err?.response?.data ?? err);
+      safeJson(res, 500, {
+        message: "Erro ao selecionar conta do Instagram",
+        details: err?.response?.data ?? String(err),
+      });
+      return;
+    }
+  }
+
+  /**
+   * ✅ POST /api/instagram/confirm
+   * ✅ FIX TS: normaliza selections para sempre ter facebookPageId: string
    */
   async confirm(req: Request, res: Response): Promise<void> {
     const userId = getAuthenticatedUserId(req);
@@ -933,18 +996,30 @@ export class InstagramAuthController {
     }
 
     const selectionId = String((req.body as any)?.selectionId ?? "").trim();
-    const selections = (req.body as any)?.selections;
     const returnToRaw = String((req.body as any)?.returnTo ?? "/settings");
     const redirect = parseRedirectParam((req.body as any)?.redirect);
-
     const returnTo = returnToRaw.startsWith("/") ? returnToRaw : "/settings";
 
     if (!selectionId) {
       safeJson(res, 400, { message: "selectionId é obrigatório" });
       return;
     }
+
+    // ✅ normaliza para o tipo do usecase (facebookPageId obrigatório)
+    const selections = Array.isArray((req.body as any)?.selections)
+      ? (req.body as any).selections.map((s: any) => ({
+          igUserId: String(s?.igUserId ?? "").trim(),
+          facebookPageId: String(s?.facebookPageId ?? "").trim(), // ✅ sempre string
+        }))
+      : [];
+
     if (!Array.isArray(selections) || selections.length === 0) {
       safeJson(res, 400, { message: "Selecione ao menos uma conta" });
+      return;
+    }
+
+    if (selections.some((s: any) => !s.igUserId)) {
+      safeJson(res, 400, { message: "igUserId é obrigatório em todas as seleções" });
       return;
     }
 
@@ -955,14 +1030,12 @@ export class InstagramAuthController {
         selections,
       });
 
-      // ✅ enfileirar backfill para cada conta conectada
       const connectedAccountIds: string[] = [];
 
       for (const r of results) {
-        const igUserId = String(r.igUserId);
-        const facebookPageId = r.facebookPageId ? String(r.facebookPageId) : null;
+        const igUserId = String((r as any).igUserId);
+        const facebookPageId = String((r as any).facebookPageId ?? "").trim();
 
-        // tenta achar a conta criada/atualizada pelo tokenStore
         const acc = await prisma.instagramAccount.findFirst({
           where: {
             userId,
@@ -977,13 +1050,7 @@ export class InstagramAuthController {
       }
 
       for (const id of connectedAccountIds) {
-        const job = await enqueueInstagramBackfill({ userId, instagramAccountId: id });
-        reminderLogSafe("[IG] backfill enqueued", {
-          userId,
-          instagramAccountId: id,
-          jobId: job.id,
-          status: job.status,
-        });
+        await enqueueInstagramBackfill({ userId, instagramAccountId: id });
       }
 
       if (!redirect) {
@@ -1020,31 +1087,37 @@ export class InstagramAuthController {
       return;
     }
 
-    const row = await prisma.instagramAccount.findFirst({
-      where: { userId },
-      orderBy: { updatedAt: "desc" },
-    });
+    const row =
+      (await prisma.instagramAccount.findFirst({
+        where: { userId, isConnected: true },
+        orderBy: { updatedAt: "desc" },
+      })) ||
+      (await prisma.instagramAccount.findFirst({
+        where: { userId },
+        orderBy: { updatedAt: "desc" },
+      }));
 
-    const connected = !!row?.isConnected && (!!row?.pageAccessToken || !!row?.accessToken);
+    const connected =
+      !!row?.isConnected && (!!(row as any)?.pageAccessToken || !!(row as any)?.accessToken);
 
     reminderLogSafe("[IG] status", {
       userId,
       hasRow: !!row,
-      instagramId: row?.instagramId ?? null,
-      instagramAccountId: row?.id ?? null,
-      isConnected: row?.isConnected ?? false,
-      hasAccessToken: !!row?.accessToken,
-      hasPageAccessToken: !!row?.pageAccessToken,
+      instagramId: (row as any)?.instagramId ?? null,
+      instagramAccountId: (row as any)?.id ?? null,
+      isConnected: (row as any)?.isConnected ?? false,
+      hasAccessToken: !!(row as any)?.accessToken,
+      hasPageAccessToken: !!(row as any)?.pageAccessToken,
       computedConnected: connected,
     });
 
     safeJson(res, 200, {
       connected,
-      instagramAccountId: row?.id ?? null,
-      igUserId: row?.instagramId ?? null,
-      username: row?.instagramUserName ?? null,
-      accountType: row?.accountType ?? null,
-      expiresAt: row?.accessTokenExpiresAt ?? null,
+      instagramAccountId: (row as any)?.id ?? null,
+      igUserId: (row as any)?.instagramId ?? null,
+      username: (row as any)?.instagramUserName ?? null,
+      accountType: (row as any)?.accountType ?? null,
+      expiresAt: (row as any)?.accessTokenExpiresAt ?? null,
     });
   }
 
@@ -1090,14 +1163,20 @@ export class InstagramAuthController {
     const instagramAccountId = getInstagramAccountIdFromQuery(req);
     const row = await getInstagramAccountForRequest(userId, instagramAccountId);
 
-    if (!row || !row.isConnected || !row.instagramId || (!row.pageAccessToken && !row.accessToken)) {
+    if (
+      !row ||
+      !(row as any).isConnected ||
+      !(row as any).instagramId ||
+      (!(row as any).pageAccessToken && !(row as any).accessToken)
+    ) {
       safeJson(res, 409, { message: "Instagram não conectado" });
       return;
     }
 
-    const igUserId = row.instagramId;
-    const accessToken = row.pageAccessToken ?? row.accessToken!;
-    const graphBaseUrl = process.env.INSTAGRAM_GRAPH_BASE_URL ?? "https://graph.facebook.com/v21.0";
+    const igUserId = String((row as any).instagramId);
+    const accessToken = (row as any).pageAccessToken ?? (row as any).accessToken!;
+    const graphBaseUrl =
+      process.env.INSTAGRAM_GRAPH_BASE_URL ?? "https://graph.facebook.com/v21.0";
 
     const since = Math.floor(parseYmd(from).getTime() / 1000);
     const until = Math.floor((parseYmd(to).getTime() + 86399999) / 1000);
@@ -1113,9 +1192,13 @@ export class InstagramAuthController {
       });
 
       const currentFollowers = toFiniteNumber(profileRes.data?.followers_count);
-      const username = String(profileRes.data?.username ?? row.instagramUserName ?? "");
+      const username = String(profileRes.data?.username ?? (row as any).instagramUserName ?? "");
 
-      await saveTodayFollowersSnapshot({ userId, igUserId, followers: currentFollowers });
+      await saveTodayFollowersSnapshot({
+        userId,
+        igUserId,
+        followers: currentFollowers,
+      });
 
       const days = listDays(from, to);
 
@@ -1146,12 +1229,22 @@ export class InstagramAuthController {
       const reachByDay = mapInsightByDayRobust(reachData, "reach", days, 0);
       const profileViewsByDay = mapInsightByDayRobust(profileViewsData, "profile_views", days, 0);
 
-      const { followersByDay, hasHistory } = await getFollowersSeriesFromDb({
+      const followersRaw = await getFollowersSeriesFromDb({
         userId,
         igUserId,
-        days,
-        fallbackFollowers: currentFollowers,
+        from,
+        to,
       });
+
+      const followersByDay: Record<string, number> = { ...followersRaw };
+      const hasHistory = Object.keys(followersRaw).length > 0;
+
+      let last = hasHistory ? followersByDay[days[0]] ?? currentFollowers : currentFollowers;
+
+      for (const d of days) {
+        if (followersByDay[d] == null) followersByDay[d] = last;
+        else last = followersByDay[d];
+      }
 
       const daily = await fetchDailyInteractionsByPosts({
         igUserId,
@@ -1170,23 +1263,34 @@ export class InstagramAuthController {
 
         const followers = followersByDay[day] ?? currentFollowers;
 
-        return { date: day, followers, reach, profileViews, totalInteractions, engagementRate };
+        return {
+          date: day,
+          followers,
+          reach,
+          profileViews,
+          totalInteractions,
+          engagementRate,
+        };
       });
 
       const totalReach = timeseries.reduce((acc, t) => acc + (t.reach ?? 0), 0);
-      const totalInteractions = timeseries.reduce((acc, t) => acc + (t.totalInteractions ?? 0), 0);
+      const totalInteractions = timeseries.reduce(
+        (acc, t) => acc + (t.totalInteractions ?? 0),
+        0
+      );
       const avgEngagementRate =
         timeseries.length > 0
-          ? timeseries.reduce((acc, t) => acc + (t.engagementRate ?? 0), 0) / timeseries.length
+          ? timeseries.reduce((acc, t) => acc + (t.engagementRate ?? 0), 0) /
+            timeseries.length
           : 0;
 
       const followersKpi = timeseries[timeseries.length - 1]?.followers ?? currentFollowers;
 
-      // ✅ TOP CONTENT DB-FIRST
       let topContent: any[] = [];
       try {
         const dbTop = await fetchTopContentFromDb({
           userId,
+          instagramAccountId: (row as any).id,
           from,
           to,
           followersBase: currentFollowers,
@@ -1219,7 +1323,7 @@ export class InstagramAuthController {
         },
         timeseries,
         topContent,
-        account: { igUserId, username, instagramAccountId: row.id },
+        account: { igUserId, username, instagramAccountId: (row as any).id },
         meta: {
           followersHistorySource: hasHistory ? "db" : "fallback",
           interactionsSource: "posts_sum",
@@ -1233,7 +1337,7 @@ export class InstagramAuthController {
 
       if (isInstagramTokenInvalid(err)) {
         await prisma.instagramAccount.update({
-          where: { id: row.id },
+          where: { id: (row as any).id },
           data: {
             isConnected: false,
             accessToken: null,
@@ -1254,13 +1358,5 @@ export class InstagramAuthController {
       });
       return;
     }
-  }
-}
-
-function reminderLogSafe(message: string, obj: any) {
-  try {
-    console.log(message, obj);
-  } catch {
-    console.log(message);
   }
 }
