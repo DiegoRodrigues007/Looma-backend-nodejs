@@ -1,3 +1,4 @@
+// src/presentation/http/routes/instagramRouter.ts
 import { Router } from "express";
 import { makeInstagramAuthController } from "../../composition/instagramComposition";
 import { authMiddleware } from "../middlewares/authMiddleware";
@@ -113,6 +114,80 @@ instagramRouter.get("/status", authMiddleware, async (req, res) => {
 });
 
 /**
+ * ✅ NOVO: listar TODAS as contas Instagram conectadas do usuário
+ *
+ * @openapi
+ * /api/instagram/accounts:
+ *   get:
+ *     tags:
+ *       - Instagram
+ *     summary: Lista todas as contas do Instagram conectadas do usuário logado
+ *     description: Retorna todas as contas IG conectadas (multi-conta) para o usuário logado.
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Lista de contas conectadas
+ *       401:
+ *         description: Não autenticado
+ */
+instagramRouter.get("/accounts", authMiddleware, async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+
+  // ✅ se você ainda não implementou controller.accounts, já deixo fallback aqui
+  if (typeof (controller as any).accounts === "function") {
+    return (controller as any).accounts(req, res);
+  }
+
+  // Fallback: lista direto do Prisma (não quebra seu build)
+  const userId =
+    (req as any)?.user?.sub ||
+    (req as any)?.user?.id ||
+    (req as any)?.user?.userId ||
+    (req as any)?.userId ||
+    null;
+
+  if (!userId) {
+    return res.status(401).json({ ok: false, message: "Não autenticado" });
+  }
+
+  const rows = await prisma.instagramAccount.findMany({
+    where: {
+      userId: String(userId),
+      isConnected: true,
+      OR: [{ pageAccessToken: { not: null } }, { accessToken: { not: null } }],
+    },
+    orderBy: { updatedAt: "desc" },
+    select: {
+      id: true,
+      instagramId: true,
+      instagramUserName: true,
+      accountType: true,
+      facebookPageId: true,
+      accessTokenExpiresAt: true,
+      isConnected: true,
+      updatedAt: true,
+    },
+    take: 20,
+  });
+
+  return res.json({
+    ok: true,
+    total: rows.length,
+    accounts: rows.map((r) => ({
+      id: r.id,
+      igUserId: r.instagramId,
+      username: r.instagramUserName,
+      accountType: r.accountType,
+      facebookPageId: r.facebookPageId,
+      expiresAt: r.accessTokenExpiresAt,
+      isConnected: r.isConnected,
+      updatedAt: r.updatedAt,
+    })),
+  });
+});
+
+/**
  * ✅ NOVO: Candidates para o usuário escolher a página/conta IG
  *
  * O frontend pode chamar em rotas diferentes (variações/legado).
@@ -152,8 +227,6 @@ instagramRouter.get("/accounts/candidates", authMiddleware, candidatesHandler);
 instagramRouter.get("/ig-candidates", authMiddleware, candidatesHandler);
 
 /**
- * ✅ NOVO: confirma a seleção do candidate escolhido no frontend
- *
  * @openapi
  * /api/instagram/confirm:
  *   post:
@@ -298,7 +371,6 @@ instagramRouter.get("/metrics", authMiddleware, async (req, res) => {
 instagramRouter.get("/posts", authMiddleware, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
 
-  // ✅ se você ainda não criou os models Prisma (InstagramPost/InstagramPostMetric), não quebra o projeto:
   const anyPrisma = prisma as any;
   if (!anyPrisma.instagramPost) {
     return res.status(501).json({

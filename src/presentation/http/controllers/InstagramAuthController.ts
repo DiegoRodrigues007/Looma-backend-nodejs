@@ -13,21 +13,11 @@ import { prisma } from "../../../infrastructure/db/prismaClient";
 
 // ✅ helpers extraídos (http/instagram)
 import { ymd, parseYmd, listDays } from "../instagram/instagramDateUtils";
-import {
-  toFiniteNumber,
-  mapInsightByDayRobust,
-} from "../instagram/instagramInsightsMapper";
-import {
-  setIgLoginCookie,
-  getIgLoginCookie,
-  clearIgLoginCookie,
-} from "../instagram/instagramCookies";
+import { toFiniteNumber, mapInsightByDayRobust } from "../instagram/instagramInsightsMapper";
+import { setIgLoginCookie, getIgLoginCookie, clearIgLoginCookie } from "../instagram/instagramCookies";
 import { signState, safeParseState } from "../instagram/instagramState";
 import { isInstagramTokenInvalid } from "../instagram/instagramErrors";
-import {
-  getFollowersSeriesFromDb,
-  saveTodayFollowersSnapshot,
-} from "../instagram/instagramFollowersRepository";
+import { getFollowersSeriesFromDb, saveTodayFollowersSnapshot } from "../instagram/instagramFollowersRepository";
 
 /* =========================
    Tipos (Graph API)
@@ -94,13 +84,11 @@ function getAuthenticatedUserId(req: Request): string | null {
     anyReq?.userId ||
     null;
 
-  if (typeof fromUser === "string" && fromUser.trim().length > 0)
-    return fromUser.trim();
+  if (typeof fromUser === "string" && fromUser.trim().length > 0) return fromUser.trim();
   if (typeof fromUser === "number") return String(fromUser);
 
   const fromHeader = req.header("x-user-id");
-  if (typeof fromHeader === "string" && fromHeader.trim().length > 0)
-    return fromHeader.trim();
+  if (typeof fromHeader === "string" && fromHeader.trim().length > 0) return fromHeader.trim();
 
   return null;
 }
@@ -135,15 +123,11 @@ function safeRedirect(res: Response, status: number, url: string) {
   res.redirect(status, url);
 }
 
-function buildFrontRedirect(opts: {
-  returnTo: string;
-  params: Record<string, string>;
-}) {
+function buildFrontRedirect(opts: { returnTo: string; params: Record<string, string> }) {
   const frontUrl = process.env.FRONTEND_URL ?? "http://localhost:5173";
   const { returnTo, params } = opts;
 
-  const safeReturnTo =
-    returnTo && returnTo.startsWith("/") ? returnTo : "/settings";
+  const safeReturnTo = returnTo && returnTo.startsWith("/") ? returnTo : "/settings";
   const base = `${frontUrl}${safeReturnTo}`;
   const qs = new URLSearchParams(params);
 
@@ -169,8 +153,7 @@ function normalizeCandidate(c: any): IgCandidate {
     username: String(c?.username ?? "").trim(),
     accountType: String(c?.accountType ?? "").trim(),
     facebookPageId: String(c?.facebookPageId ?? "").trim(),
-    facebookPageName:
-      c?.facebookPageName != null ? String(c.facebookPageName) : undefined,
+    facebookPageName: c?.facebookPageName != null ? String(c.facebookPageName) : undefined,
     pageAccessToken: String(c?.pageAccessToken ?? "").trim(),
     source:
       c?.source === "connected_instagram_account"
@@ -179,24 +162,14 @@ function normalizeCandidate(c: any): IgCandidate {
   };
 }
 
-async function persistCandidatesToDb(opts: {
-  userId: string;
-  selectionId: string;
-  candidates: any[];
-}) {
+async function persistCandidatesToDb(opts: { userId: string; selectionId: string; candidates: any[] }) {
   const { userId, selectionId } = opts;
   const candidates = Array.isArray(opts.candidates) ? opts.candidates : [];
 
   // evita inserir lixo
   const normalized = candidates
     .map(normalizeCandidate)
-    .filter(
-      (c) =>
-        !!c.igUserId &&
-        !!c.facebookPageId &&
-        !!c.pageAccessToken &&
-        !!c.username
-    );
+    .filter((c) => !!c.igUserId && !!c.facebookPageId && !!c.pageAccessToken && !!c.username);
 
   if (!selectionId || !userId || normalized.length === 0) return;
 
@@ -227,17 +200,11 @@ async function persistCandidatesToDb(opts: {
     });
   } catch (e: any) {
     // não derruba o fluxo se falhar persistência
-    console.warn(
-      "[IG] persistCandidatesToDb warning:",
-      e?.message ?? e
-    );
+    console.warn("[IG] persistCandidatesToDb warning:", e?.message ?? e);
   }
 }
 
-async function readCandidatesFromDb(opts: {
-  userId: string;
-  selectionId: string;
-}): Promise<IgCandidate[]> {
+async function readCandidatesFromDb(opts: { userId: string; selectionId: string }): Promise<IgCandidate[]> {
   const { userId, selectionId } = opts;
 
   try {
@@ -314,15 +281,14 @@ async function fetchDailyInteractionsByPosts(opts: {
   let after: string | undefined = undefined;
 
   for (let guard = 0; guard < 30; guard++) {
-    const mediaRes: AxiosResponse<IgMediaResponse> =
-      await graph.get<IgMediaResponse>(`/${igUserId}/media`, {
-        params: {
-          fields: "id,timestamp,like_count,comments_count",
-          limit: 100,
-          after,
-          access_token: accessToken,
-        },
-      });
+    const mediaRes: AxiosResponse<IgMediaResponse> = await graph.get<IgMediaResponse>(`/${igUserId}/media`, {
+      params: {
+        fields: "id,timestamp,like_count,comments_count",
+        limit: 100,
+        after,
+        access_token: accessToken,
+      },
+    });
 
     const data: IgMediaItem[] = mediaRes.data?.data ?? [];
     allMedia.push(...data);
@@ -365,19 +331,17 @@ async function fetchDailyInteractionsByPosts(opts: {
 
   await asyncPool(6, inRange, async (m) => {
     try {
-      const insightsRes: AxiosResponse<IgInsightsResponse> =
-        await graph.get<IgInsightsResponse>(`/${m.id}/insights`, {
-          params: {
-            metric: "shares,saved",
-            access_token: accessToken,
-          },
-        });
+      const insightsRes: AxiosResponse<IgInsightsResponse> = await graph.get<IgInsightsResponse>(`/${m.id}/insights`, {
+        params: {
+          metric: "shares,saved",
+          access_token: accessToken,
+        },
+      });
 
       const arr = insightsRes.data?.data ?? [];
 
       const pickValue = (row: IgInsightRow): number => {
-        const v =
-          row?.values?.[0]?.value ?? row?.total_value ?? row?.value ?? row ?? 0;
+        const v = row?.values?.[0]?.value ?? row?.total_value ?? row?.value ?? row ?? 0;
         return toFiniteNumber(v);
       };
 
@@ -446,8 +410,7 @@ async function fetchTopContentFromDb(opts: {
       const reach = toFiniteNumber(m?.reach);
       const shares = toFiniteNumber(m?.shares);
       const saved = toFiniteNumber(m?.saves);
-      const totalInteractions =
-        toFiniteNumber(m?.totalInteractions) || likes + comments + shares + saved;
+      const totalInteractions = toFiniteNumber(m?.totalInteractions) || likes + comments + shares + saved;
 
       const plays = toFiniteNumber(m?.plays);
       const videoViews = toFiniteNumber(m?.videoViews);
@@ -474,9 +437,7 @@ async function fetchTopContentFromDb(opts: {
         },
       };
     })
-    .sort(
-      (a, b) => (b.insights?.totalInteractions ?? 0) - (a.insights?.totalInteractions ?? 0)
-    )
+    .sort((a, b) => (b.insights?.totalInteractions ?? 0) - (a.insights?.totalInteractions ?? 0))
     .slice(0, 6);
 
   return items;
@@ -495,15 +456,13 @@ async function fetchTopContent(opts: {
   const fromTs = parseYmd(from).getTime();
   const toTs = parseYmd(to).getTime() + 86399999;
 
-  const mediaRes: AxiosResponse<IgMediaResponse> =
-    await graph.get<IgMediaResponse>(`/${igUserId}/media`, {
-      params: {
-        fields:
-          "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count",
-        limit: 50,
-        access_token: accessToken,
-      },
-    });
+  const mediaRes: AxiosResponse<IgMediaResponse> = await graph.get<IgMediaResponse>(`/${igUserId}/media`, {
+    params: {
+      fields: "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count",
+      limit: 50,
+      access_token: accessToken,
+    },
+  });
 
   const data = mediaRes.data?.data ?? [];
   const denom = Math.max(1, toFiniteNumber(followersBase));
@@ -550,19 +509,17 @@ async function fetchTopContent(opts: {
   const enriched = await Promise.all(
     items.map(async (it) => {
       try {
-        const insightsRes: AxiosResponse<IgInsightsResponse> =
-          await graph.get<IgInsightsResponse>(`/${it.id}/insights`, {
-            params: {
-              metric: "plays,video_views,reach,total_interactions,shares,saved",
-              access_token: accessToken,
-            },
-          });
+        const insightsRes: AxiosResponse<IgInsightsResponse> = await graph.get<IgInsightsResponse>(`/${it.id}/insights`, {
+          params: {
+            metric: "plays,video_views,reach,total_interactions,shares,saved",
+            access_token: accessToken,
+          },
+        });
 
         const arr = insightsRes.data?.data ?? [];
 
         const pickValue = (row: IgInsightRow): number | null => {
-          const v =
-            row?.values?.[0]?.value ?? row?.total_value ?? row?.value ?? row ?? null;
+          const v = row?.values?.[0]?.value ?? row?.total_value ?? row?.value ?? row ?? null;
           const n = toFiniteNumber(v);
           return Number.isFinite(n) ? n : null;
         };
@@ -601,10 +558,7 @@ async function fetchTopContent(opts: {
    Backfill enqueue (multi-conta)
 ========================= */
 
-async function enqueueInstagramBackfill(opts: {
-  userId: string;
-  instagramAccountId: string;
-}) {
+async function enqueueInstagramBackfill(opts: { userId: string; instagramAccountId: string }) {
   const { userId, instagramAccountId } = opts;
 
   const existing = await prisma.instagramBackfillJob.findFirst({
@@ -640,10 +594,7 @@ function getInstagramAccountIdFromQuery(req: Request): string | null {
   return s.length > 0 ? s : null;
 }
 
-async function getInstagramAccountForRequest(
-  userId: string,
-  instagramAccountId?: string | null
-) {
+async function getInstagramAccountForRequest(userId: string, instagramAccountId?: string | null) {
   if (instagramAccountId) {
     return prisma.instagramAccount.findFirst({
       where: { id: instagramAccountId, userId },
@@ -752,18 +703,11 @@ export class InstagramAuthController {
         | InstagramLoginChooseRequired;
 
       if (result?.status === "reauth_required") {
-        const missing = Array.isArray((result as any)?.missingPermissions)
-          ? (result as any).missingPermissions
-          : [];
+        const missing = Array.isArray((result as any)?.missingPermissions) ? (result as any).missingPermissions : [];
 
-        reminderLogSafe("[IG] reauth required -> rerequest", {
-          userId,
-          missingPermissions: missing,
-        });
+        reminderLogSafe("[IG] reauth required -> rerequest", { userId, missingPermissions: missing });
 
-        const urlFromUseCase = (result as any)?.loginUrl
-          ? String((result as any).loginUrl)
-          : "";
+        const urlFromUseCase = (result as any)?.loginUrl ? String((result as any).loginUrl) : "";
         const rerequestUrl = urlFromUseCase || this.authService.buildLoginUrl(state, true);
 
         clearIgLoginCookie(res);
@@ -786,9 +730,7 @@ export class InstagramAuthController {
         clearIgLoginCookie(res);
 
         const selectionId = String((result as any).selectionId);
-        const candidates = Array.isArray((result as any).candidates)
-          ? (result as any).candidates
-          : [];
+        const candidates = Array.isArray((result as any).candidates) ? (result as any).candidates : [];
 
         reminderLogSafe("[IG] choose_required", {
           userId,
@@ -894,8 +836,7 @@ export class InstagramAuthController {
         return;
       }
 
-      const msg =
-        err?.message ? String(err.message) : "Erro ao listar candidates";
+      const msg = err?.message ? String(err.message) : "Erro ao listar candidates";
       safeJson(res, 400, {
         message: msg,
         reason: "selection_expired_or_not_found",
@@ -918,8 +859,7 @@ export class InstagramAuthController {
     const selectionId = String((req.body as any)?.selectionId ?? "").trim();
     const igUserId = String((req.body as any)?.igUserId ?? "").trim();
     const facebookPageIdRaw = (req.body as any)?.facebookPageId;
-    const facebookPageId =
-      facebookPageIdRaw != null ? String(facebookPageIdRaw).trim() : "";
+    const facebookPageId = facebookPageIdRaw != null ? String(facebookPageIdRaw).trim() : "";
 
     if (!selectionId) {
       safeJson(res, 400, { message: "selectionId é obrigatório" });
@@ -1080,6 +1020,47 @@ export class InstagramAuthController {
     }
   }
 
+  /**
+   * ✅ NOVO:
+   * ✅ GET /api/instagram/accounts
+   * Retorna TODAS as contas conectadas do usuário (multi-conta),
+   * para o frontend exibir no card "Contas conectadas".
+   */
+  async accounts(req: Request, res: Response): Promise<void> {
+    const userId = getAuthenticatedUserId(req);
+    if (!userId) {
+      safeJson(res, 401, { message: "Não autenticado" });
+      return;
+    }
+
+    const rows = await prisma.instagramAccount.findMany({
+      where: {
+        userId,
+        isConnected: true,
+      },
+      orderBy: { updatedAt: "desc" },
+      select: {
+        id: true,
+        instagramId: true,
+        instagramUserName: true,
+        accountType: true,
+        facebookPageId: true,
+        updatedAt: true,
+      },
+    });
+
+    safeJson(res, 200, {
+      accounts: rows.map((r) => ({
+        id: r.id,
+        igUserId: r.instagramId,
+        username: r.instagramUserName,
+        accountType: r.accountType,
+        facebookPageId: r.facebookPageId,
+        updatedAt: r.updatedAt,
+      })),
+    });
+  }
+
   async status(req: Request, res: Response): Promise<void> {
     const userId = getAuthenticatedUserId(req);
     if (!userId) {
@@ -1175,8 +1156,7 @@ export class InstagramAuthController {
 
     const igUserId = String((row as any).instagramId);
     const accessToken = (row as any).pageAccessToken ?? (row as any).accessToken!;
-    const graphBaseUrl =
-      process.env.INSTAGRAM_GRAPH_BASE_URL ?? "https://graph.facebook.com/v21.0";
+    const graphBaseUrl = process.env.INSTAGRAM_GRAPH_BASE_URL ?? "https://graph.facebook.com/v21.0";
 
     const since = Math.floor(parseYmd(from).getTime() / 1000);
     const until = Math.floor((parseYmd(to).getTime() + 86399999) / 1000);
@@ -1194,11 +1174,7 @@ export class InstagramAuthController {
       const currentFollowers = toFiniteNumber(profileRes.data?.followers_count);
       const username = String(profileRes.data?.username ?? (row as any).instagramUserName ?? "");
 
-      await saveTodayFollowersSnapshot({
-        userId,
-        igUserId,
-        followers: currentFollowers,
-      });
+      await saveTodayFollowersSnapshot({ userId, igUserId, followers: currentFollowers });
 
       const days = listDays(from, to);
 
@@ -1263,25 +1239,14 @@ export class InstagramAuthController {
 
         const followers = followersByDay[day] ?? currentFollowers;
 
-        return {
-          date: day,
-          followers,
-          reach,
-          profileViews,
-          totalInteractions,
-          engagementRate,
-        };
+        return { date: day, followers, reach, profileViews, totalInteractions, engagementRate };
       });
 
       const totalReach = timeseries.reduce((acc, t) => acc + (t.reach ?? 0), 0);
-      const totalInteractions = timeseries.reduce(
-        (acc, t) => acc + (t.totalInteractions ?? 0),
-        0
-      );
+      const totalInteractions = timeseries.reduce((acc, t) => acc + (t.totalInteractions ?? 0), 0);
       const avgEngagementRate =
         timeseries.length > 0
-          ? timeseries.reduce((acc, t) => acc + (t.engagementRate ?? 0), 0) /
-            timeseries.length
+          ? timeseries.reduce((acc, t) => acc + (t.engagementRate ?? 0), 0) / timeseries.length
           : 0;
 
       const followersKpi = timeseries[timeseries.length - 1]?.followers ?? currentFollowers;
