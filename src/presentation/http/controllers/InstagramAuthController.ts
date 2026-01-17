@@ -11,13 +11,20 @@ import {
 } from "../../../application/instagram/CompleteIgLoginUseCase";
 import { prisma } from "../../../infrastructure/db/prismaClient";
 
+// ✅ NOVO: multi-conta (listar + setar conta ativa)
+import { ListInstagramAccountsUseCase } from "../../../application/instagram/ListInstagramAccountsUseCase";
+import { SetActiveInstagramAccountUseCase } from "../../../application/instagram/SetActiveInstagramAccountUseCase";
+
 // ✅ helpers extraídos (http/instagram)
 import { ymd, parseYmd, listDays } from "../instagram/instagramDateUtils";
 import { toFiniteNumber, mapInsightByDayRobust } from "../instagram/instagramInsightsMapper";
 import { setIgLoginCookie, getIgLoginCookie, clearIgLoginCookie } from "../instagram/instagramCookies";
 import { signState, safeParseState } from "../instagram/instagramState";
 import { isInstagramTokenInvalid } from "../instagram/instagramErrors";
-import { getFollowersSeriesFromDb, saveTodayFollowersSnapshot } from "../instagram/instagramFollowersRepository";
+import {
+  getFollowersSeriesFromDb,
+  saveTodayFollowersSnapshot,
+} from "../instagram/instagramFollowersRepository";
 
 /* =========================
    Tipos (Graph API)
@@ -58,7 +65,6 @@ type IgInsightsResponse = {
 
 /**
  * ✅ Candidato encontrado para o usuário escolher no frontend
- * - Pode ser Business (instagram_business_account) ou Creator (connected_instagram_account)
  */
 export type IgCandidate = {
   igUserId: string;
@@ -98,7 +104,6 @@ function getAuthenticatedUserId(req: Request): string | null {
 ========================= */
 
 function parseRedirectParam(v: unknown): boolean {
-  // ✅ default = true (callback do FB)
   if (v === undefined || v === null || v === "") return true;
 
   if (typeof v === "boolean") return v;
@@ -144,7 +149,7 @@ function reminderLogSafe(message: string, obj?: any) {
 }
 
 /* =========================
-   ✅ Persistência de candidates (resolve 400 após refresh/restart)
+   ✅ Persistência de candidates
 ========================= */
 
 function normalizeCandidate(c: any): IgCandidate {
@@ -166,17 +171,12 @@ async function persistCandidatesToDb(opts: { userId: string; selectionId: string
   const { userId, selectionId } = opts;
   const candidates = Array.isArray(opts.candidates) ? opts.candidates : [];
 
-  // evita inserir lixo
   const normalized = candidates
     .map(normalizeCandidate)
     .filter((c) => !!c.igUserId && !!c.facebookPageId && !!c.pageAccessToken && !!c.username);
 
   if (!selectionId || !userId || normalized.length === 0) return;
 
-  // ✅ estratégia simples e robusta:
-  // - remove registros antigos dessa selectionId
-  // - reinsere os atuais
-  // Isso elimina necessidade de unique/skipDuplicates.
   try {
     await prisma.instagramCandidate.deleteMany({
       where: { userId, selectionId },
@@ -186,20 +186,16 @@ async function persistCandidatesToDb(opts: { userId: string; selectionId: string
       data: normalized.map((c) => ({
         userId,
         selectionId,
-
         igUserId: c.igUserId,
         username: c.username,
         accountType: c.accountType,
-
         facebookPageId: c.facebookPageId,
         facebookPageName: c.facebookPageName ?? null,
-
         pageAccessToken: c.pageAccessToken,
         source: c.source,
       })),
     });
   } catch (e: any) {
-    // não derruba o fluxo se falhar persistência
     console.warn("[IG] persistCandidatesToDb warning:", e?.message ?? e);
   }
 }
@@ -373,7 +369,7 @@ async function fetchDailyInteractionsByPosts(opts: {
 
 async function fetchTopContentFromDb(opts: {
   userId: string;
-  instagramAccountId: string; // ✅ filtra por conta
+  instagramAccountId: string;
   from: string;
   to: string;
   followersBase: number;
@@ -458,7 +454,8 @@ async function fetchTopContent(opts: {
 
   const mediaRes: AxiosResponse<IgMediaResponse> = await graph.get<IgMediaResponse>(`/${igUserId}/media`, {
     params: {
-      fields: "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count",
+      fields:
+        "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count",
       limit: 50,
       access_token: accessToken,
     },
@@ -572,15 +569,13 @@ async function enqueueInstagramBackfill(opts: { userId: string; instagramAccount
 
   if (existing) return existing;
 
-  const job = await prisma.instagramBackfillJob.create({
+  return prisma.instagramBackfillJob.create({
     data: {
       userId,
       instagramAccountId,
       status: "queued",
     },
   });
-
-  return job;
 }
 
 /* =========================
@@ -594,6 +589,19 @@ function getInstagramAccountIdFromQuery(req: Request): string | null {
   return s.length > 0 ? s : null;
 }
 
+async function getActiveInstagramAccountIdFromUser(userId: string): Promise<string | null> {
+  try {
+    const u = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { activeInstagramAccountId: true },
+    });
+    const id = u?.activeInstagramAccountId;
+    return id ? String(id) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function getInstagramAccountForRequest(userId: string, instagramAccountId?: string | null) {
   if (instagramAccountId) {
     return prisma.instagramAccount.findFirst({
@@ -602,14 +610,21 @@ async function getInstagramAccountForRequest(userId: string, instagramAccountId?
     });
   }
 
-  // ✅ preferência: conta conectada mais recente
+  const activeId = await getActiveInstagramAccountIdFromUser(userId);
+  if (activeId) {
+    const active = await prisma.instagramAccount.findFirst({
+      where: { id: activeId, userId },
+      orderBy: { updatedAt: "desc" },
+    });
+    if (active) return active;
+  }
+
   const connected = await prisma.instagramAccount.findFirst({
     where: { userId, isConnected: true },
     orderBy: { updatedAt: "desc" },
   });
   if (connected) return connected;
 
-  // fallback: última atualizada
   return prisma.instagramAccount.findFirst({
     where: { userId },
     orderBy: { updatedAt: "desc" },
@@ -623,7 +638,9 @@ async function getInstagramAccountForRequest(userId: string, instagramAccountId?
 export class InstagramAuthController {
   constructor(
     private readonly authService: IInstagramIgLoginAuthService,
-    private readonly completeLogin: CompleteIgLoginUseCase
+    private readonly completeLogin: CompleteIgLoginUseCase,
+    private readonly listAccounts: ListInstagramAccountsUseCase,
+    private readonly setActiveAccount: SetActiveInstagramAccountUseCase
   ) {}
 
   async start(req: Request, res: Response): Promise<void> {
@@ -703,9 +720,14 @@ export class InstagramAuthController {
         | InstagramLoginChooseRequired;
 
       if (result?.status === "reauth_required") {
-        const missing = Array.isArray((result as any)?.missingPermissions) ? (result as any).missingPermissions : [];
+        const missing = Array.isArray((result as any)?.missingPermissions)
+          ? (result as any).missingPermissions
+          : [];
 
-        reminderLogSafe("[IG] reauth required -> rerequest", { userId, missingPermissions: missing });
+        reminderLogSafe("[IG] reauth required -> rerequest", {
+          userId,
+          missingPermissions: missing,
+        });
 
         const urlFromUseCase = (result as any)?.loginUrl ? String((result as any).loginUrl) : "";
         const rerequestUrl = urlFromUseCase || this.authService.buildLoginUrl(state, true);
@@ -738,7 +760,6 @@ export class InstagramAuthController {
           candidatesCount: candidates.length,
         });
 
-        // ✅ NOVO: persistir candidates no DB para sobreviver refresh/restart
         await persistCandidatesToDb({ userId, selectionId, candidates });
 
         if (!redirect) {
@@ -802,9 +823,6 @@ export class InstagramAuthController {
 
   /**
    * ✅ GET /api/instagram/candidates?selectionId=...
-   * ✅ FIX: não depende mais apenas de memória/cache do UseCase.
-   * - tenta UseCase (fluxo normal)
-   * - se falhar/expirou, busca no DB (persistido no callback)
    */
   async candidates(req: Request, res: Response): Promise<void> {
     const userId = getAuthenticatedUserId(req);
@@ -819,17 +837,12 @@ export class InstagramAuthController {
       return;
     }
 
-    // 1) tenta via UseCase (pode falhar se reiniciou/expirou)
     try {
       const candidates = await this.completeLogin.getCandidates({ selectionId, userId });
-
-      // ✅ garante persistência mesmo se candidates só existiam em memória
       await persistCandidatesToDb({ userId, selectionId, candidates });
-
       safeJson(res, 200, { selectionId, candidates });
       return;
     } catch (err: any) {
-      // 2) fallback DB
       const fromDb = await readCandidatesFromDb({ userId, selectionId });
       if (fromDb.length > 0) {
         safeJson(res, 200, { selectionId, candidates: fromDb });
@@ -846,87 +859,7 @@ export class InstagramAuthController {
   }
 
   /**
-   * ✅ POST /api/instagram/choose
-   * ✅ FIX TS: facebookPageId sempre string
-   */
-  async choose(req: Request, res: Response): Promise<void> {
-    const userId = getAuthenticatedUserId(req);
-    if (!userId) {
-      safeJson(res, 401, { message: "Não autenticado" });
-      return;
-    }
-
-    const selectionId = String((req.body as any)?.selectionId ?? "").trim();
-    const igUserId = String((req.body as any)?.igUserId ?? "").trim();
-    const facebookPageIdRaw = (req.body as any)?.facebookPageId;
-    const facebookPageId = facebookPageIdRaw != null ? String(facebookPageIdRaw).trim() : "";
-
-    if (!selectionId) {
-      safeJson(res, 400, { message: "selectionId é obrigatório" });
-      return;
-    }
-    if (!igUserId) {
-      safeJson(res, 400, { message: "igUserId é obrigatório" });
-      return;
-    }
-
-    // ✅ IMPORTANT: o UseCase exige facebookPageId: string (obrigatório)
-    const selections = [
-      {
-        igUserId,
-        facebookPageId: facebookPageId || "",
-      },
-    ];
-
-    try {
-      const results = await this.completeLogin.confirmSelection({
-        selectionId,
-        userId,
-        selections,
-      });
-
-      const connectedAccountIds: string[] = [];
-
-      for (const r of results) {
-        const ig = String((r as any).igUserId);
-        const fb = String((r as any).facebookPageId ?? "").trim();
-
-        const acc = await prisma.instagramAccount.findFirst({
-          where: {
-            userId,
-            instagramId: ig,
-            ...(fb ? { facebookPageId: fb } : {}),
-          },
-          orderBy: { updatedAt: "desc" },
-          select: { id: true },
-        });
-
-        if (acc?.id) connectedAccountIds.push(acc.id);
-      }
-
-      for (const id of connectedAccountIds) {
-        await enqueueInstagramBackfill({ userId, instagramAccountId: id });
-      }
-
-      safeJson(res, 200, {
-        status: "ok",
-        accounts: results,
-        instagramAccountIds: connectedAccountIds,
-      });
-      return;
-    } catch (err: any) {
-      console.error("[IG] choose error:", err?.response?.data ?? err);
-      safeJson(res, 500, {
-        message: "Erro ao selecionar conta do Instagram",
-        details: err?.response?.data ?? String(err),
-      });
-      return;
-    }
-  }
-
-  /**
    * ✅ POST /api/instagram/confirm
-   * ✅ FIX TS: normaliza selections para sempre ter facebookPageId: string
    */
   async confirm(req: Request, res: Response): Promise<void> {
     const userId = getAuthenticatedUserId(req);
@@ -945,11 +878,10 @@ export class InstagramAuthController {
       return;
     }
 
-    // ✅ normaliza para o tipo do usecase (facebookPageId obrigatório)
     const selections = Array.isArray((req.body as any)?.selections)
       ? (req.body as any).selections.map((s: any) => ({
           igUserId: String(s?.igUserId ?? "").trim(),
-          facebookPageId: String(s?.facebookPageId ?? "").trim(), // ✅ sempre string
+          facebookPageId: String(s?.facebookPageId ?? "").trim(),
         }))
       : [];
 
@@ -979,7 +911,7 @@ export class InstagramAuthController {
         const acc = await prisma.instagramAccount.findFirst({
           where: {
             userId,
-            instagramId: igUserId,
+            igUserId,
             ...(facebookPageId ? { facebookPageId } : {}),
           },
           orderBy: { updatedAt: "desc" },
@@ -991,6 +923,17 @@ export class InstagramAuthController {
 
       for (const id of connectedAccountIds) {
         await enqueueInstagramBackfill({ userId, instagramAccountId: id });
+      }
+
+      if (connectedAccountIds.length === 1) {
+        try {
+          await this.setActiveAccount.execute({
+            userId,
+            instagramAccountId: connectedAccountIds[0],
+          });
+        } catch {
+          // não quebra o fluxo
+        }
       }
 
       if (!redirect) {
@@ -1021,10 +964,7 @@ export class InstagramAuthController {
   }
 
   /**
-   * ✅ NOVO:
    * ✅ GET /api/instagram/accounts
-   * Retorna TODAS as contas conectadas do usuário (multi-conta),
-   * para o frontend exibir no card "Contas conectadas".
    */
   async accounts(req: Request, res: Response): Promise<void> {
     const userId = getAuthenticatedUserId(req);
@@ -1033,32 +973,65 @@ export class InstagramAuthController {
       return;
     }
 
-    const rows = await prisma.instagramAccount.findMany({
-      where: {
-        userId,
-        isConnected: true,
-      },
-      orderBy: { updatedAt: "desc" },
-      select: {
-        id: true,
-        instagramId: true,
-        instagramUserName: true,
-        accountType: true,
-        facebookPageId: true,
-        updatedAt: true,
-      },
-    });
+    try {
+      // ✅ UseCase recebe STRING
+      const result = await this.listAccounts.execute(userId);
+      safeJson(res, 200, result);
+      return;
+    } catch (e: any) {
+      const rows = await prisma.instagramAccount.findMany({
+        where: { userId, isConnected: true },
+        orderBy: { updatedAt: "desc" },
+        select: {
+          id: true,
+          igUserId: true,
+          username: true,
+          accountType: true,
+          facebookPageId: true,
+          updatedAt: true,
+        },
+      });
 
-    safeJson(res, 200, {
-      accounts: rows.map((r) => ({
-        id: r.id,
-        igUserId: r.instagramId,
-        username: r.instagramUserName,
-        accountType: r.accountType,
-        facebookPageId: r.facebookPageId,
-        updatedAt: r.updatedAt,
-      })),
-    });
+      safeJson(res, 200, {
+        accounts: rows.map((r) => ({
+          id: r.id,
+          igUserId: r.igUserId,
+          username: r.username,
+          accountType: r.accountType,
+          facebookPageId: r.facebookPageId,
+          updatedAt: r.updatedAt,
+        })),
+      });
+      return;
+    }
+  }
+
+  /**
+   * ✅ POST /api/instagram/accounts/active
+   */
+  async setActive(req: Request, res: Response): Promise<void> {
+    const userId = getAuthenticatedUserId(req);
+    if (!userId) {
+      safeJson(res, 401, { message: "Não autenticado" });
+      return;
+    }
+
+    const instagramAccountId = String((req.body as any)?.instagramAccountId ?? "").trim();
+    if (!instagramAccountId) {
+      safeJson(res, 400, { message: "instagramAccountId é obrigatório" });
+      return;
+    }
+
+    try {
+      const out = await this.setActiveAccount.execute({ userId, instagramAccountId });
+      safeJson(res, 200, out);
+      return;
+    } catch (e: any) {
+      safeJson(res, 400, {
+        message: e?.message ? String(e.message) : "Erro ao definir conta ativa",
+      });
+      return;
+    }
   }
 
   async status(req: Request, res: Response): Promise<void> {
@@ -1068,23 +1041,15 @@ export class InstagramAuthController {
       return;
     }
 
-    const row =
-      (await prisma.instagramAccount.findFirst({
-        where: { userId, isConnected: true },
-        orderBy: { updatedAt: "desc" },
-      })) ||
-      (await prisma.instagramAccount.findFirst({
-        where: { userId },
-        orderBy: { updatedAt: "desc" },
-      }));
+    const instagramAccountId = getInstagramAccountIdFromQuery(req);
+    const row = await getInstagramAccountForRequest(userId, instagramAccountId);
 
-    const connected =
-      !!row?.isConnected && (!!(row as any)?.pageAccessToken || !!(row as any)?.accessToken);
+    const connected = !!row?.isConnected && (!!(row as any)?.pageAccessToken || !!(row as any)?.accessToken);
 
     reminderLogSafe("[IG] status", {
       userId,
       hasRow: !!row,
-      instagramId: (row as any)?.instagramId ?? null,
+      igUserId: (row as any)?.igUserId ?? null,
       instagramAccountId: (row as any)?.id ?? null,
       isConnected: (row as any)?.isConnected ?? false,
       hasAccessToken: !!(row as any)?.accessToken,
@@ -1095,10 +1060,10 @@ export class InstagramAuthController {
     safeJson(res, 200, {
       connected,
       instagramAccountId: (row as any)?.id ?? null,
-      igUserId: (row as any)?.instagramId ?? null,
-      username: (row as any)?.instagramUserName ?? null,
+      igUserId: (row as any)?.igUserId ?? null,
+      username: (row as any)?.username ?? null,
       accountType: (row as any)?.accountType ?? null,
-      expiresAt: (row as any)?.accessTokenExpiresAt ?? null,
+      expiresAt: (row as any)?.expiresAt ?? null,
     });
   }
 
@@ -1115,11 +1080,20 @@ export class InstagramAuthController {
         isConnected: false,
         accessToken: null,
         pageAccessToken: null,
-        accessTokenExpiresAt: null,
+        expiresAt: null,
         grantedScopes: null,
         facebookPageId: null,
       },
     });
+
+    try {
+      await prisma.user.update({
+        where: { id: userId },
+        data: { activeInstagramAccountId: null },
+      });
+    } catch {
+      // ignore
+    }
 
     reminderLogSafe("[IG] disconnect", { userId });
 
@@ -1144,18 +1118,13 @@ export class InstagramAuthController {
     const instagramAccountId = getInstagramAccountIdFromQuery(req);
     const row = await getInstagramAccountForRequest(userId, instagramAccountId);
 
-    if (
-      !row ||
-      !(row as any).isConnected ||
-      !(row as any).instagramId ||
-      (!(row as any).pageAccessToken && !(row as any).accessToken)
-    ) {
+    if (!row || !row.isConnected || !row.igUserId || (!row.pageAccessToken && !row.accessToken)) {
       safeJson(res, 409, { message: "Instagram não conectado" });
       return;
     }
 
-    const igUserId = String((row as any).instagramId);
-    const accessToken = (row as any).pageAccessToken ?? (row as any).accessToken!;
+    const igUserId = String(row.igUserId);
+    const accessToken = row.pageAccessToken ?? row.accessToken!;
     const graphBaseUrl = process.env.INSTAGRAM_GRAPH_BASE_URL ?? "https://graph.facebook.com/v21.0";
 
     const since = Math.floor(parseYmd(from).getTime() / 1000);
@@ -1172,9 +1141,13 @@ export class InstagramAuthController {
       });
 
       const currentFollowers = toFiniteNumber(profileRes.data?.followers_count);
-      const username = String(profileRes.data?.username ?? (row as any).instagramUserName ?? "");
+      const username = String(profileRes.data?.username ?? row.username ?? "");
 
-      await saveTodayFollowersSnapshot({ userId, igUserId, followers: currentFollowers });
+      await saveTodayFollowersSnapshot({
+        userId,
+        igUserId,
+        followers: currentFollowers,
+      });
 
       const days = listDays(from, to);
 
@@ -1239,7 +1212,14 @@ export class InstagramAuthController {
 
         const followers = followersByDay[day] ?? currentFollowers;
 
-        return { date: day, followers, reach, profileViews, totalInteractions, engagementRate };
+        return {
+          date: day,
+          followers,
+          reach,
+          profileViews,
+          totalInteractions,
+          engagementRate,
+        };
       });
 
       const totalReach = timeseries.reduce((acc, t) => acc + (t.reach ?? 0), 0);
@@ -1255,15 +1235,14 @@ export class InstagramAuthController {
       try {
         const dbTop = await fetchTopContentFromDb({
           userId,
-          instagramAccountId: (row as any).id,
+          instagramAccountId: row.id,
           from,
           to,
           followersBase: currentFollowers,
         });
 
-        if (dbTop && dbTop.length > 0) {
-          topContent = dbTop;
-        } else {
+        if (dbTop && dbTop.length > 0) topContent = dbTop;
+        else {
           topContent = await fetchTopContent({
             igUserId,
             accessToken,
@@ -1288,7 +1267,7 @@ export class InstagramAuthController {
         },
         timeseries,
         topContent,
-        account: { igUserId, username, instagramAccountId: (row as any).id },
+        account: { igUserId, username, instagramAccountId: row.id },
         meta: {
           followersHistorySource: hasHistory ? "db" : "fallback",
           interactionsSource: "posts_sum",
@@ -1302,12 +1281,12 @@ export class InstagramAuthController {
 
       if (isInstagramTokenInvalid(err)) {
         await prisma.instagramAccount.update({
-          where: { id: (row as any).id },
+          where: { id: row.id },
           data: {
             isConnected: false,
             accessToken: null,
             pageAccessToken: null,
-            accessTokenExpiresAt: null,
+            expiresAt: null,
             grantedScopes: null,
             facebookPageId: null,
           },

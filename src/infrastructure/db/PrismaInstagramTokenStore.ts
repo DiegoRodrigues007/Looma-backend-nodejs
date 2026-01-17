@@ -5,7 +5,6 @@ import type {
   SaveOrUpdateInstagramTokenInput,
 } from "../../application/instagram/IInstagramTokenStore";
 
-// ✅ usa o prisma singleton do projeto (evita múltiplas conexões)
 import { prisma } from "./prismaClient";
 
 function cleanOptString(v: unknown): string | null {
@@ -14,27 +13,36 @@ function cleanOptString(v: unknown): string | null {
   return s.length ? s : null;
 }
 
+function hasOwn<T extends object>(obj: T, key: keyof any): boolean {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
 export class PrismaInstagramTokenStore implements IInstagramTokenStore {
+  /**
+   * Pega a conta IG mais recente do usuário (fallback).
+   * (Se você quiser usar "conta ativa", o ideal é receber activeInstagramAccountId aqui
+   *  ou ter um método getActiveByUserId.)
+   */
   async getByUserId(userId: string): Promise<InstagramTokenRecord | null> {
     if (!userId) return null;
 
     const row = await prisma.instagramAccount.findFirst({
-      where: { userId },
+      where: { userId, isConnected: true },
       orderBy: { updatedAt: "desc" },
     });
 
-    if (!row?.instagramId) return null;
+    if (!row?.igUserId) return null;
     if (!row.accessToken && !row.pageAccessToken) return null;
 
     return {
       userId: row.userId,
-      igUserId: row.instagramId,
+      igUserId: row.igUserId,
       accessToken: row.accessToken ?? "",
       pageAccessToken: row.pageAccessToken ?? null,
       facebookPageId: row.facebookPageId ?? null,
-      username: row.instagramUserName ?? null,
+      username: row.username ?? null,
       accountType: row.accountType ?? null,
-      expiresAt: row.accessTokenExpiresAt ?? null,
+      expiresAt: row.expiresAt ?? null,
       lastRefreshedAt: row.lastRefreshedAt ?? null,
       isConnected: row.isConnected,
     };
@@ -65,6 +73,7 @@ export class PrismaInstagramTokenStore implements IInstagramTokenStore {
     const accessTokenClean = cleanOptString(accessToken);
     const pageAccessTokenClean = cleanOptString(pageAccessToken);
 
+    // exige pelo menos um token (igual você já fazia)
     if (!accessTokenClean && !pageAccessTokenClean) {
       throw new Error(
         "accessToken ou pageAccessToken é obrigatório para salvar token do Instagram"
@@ -76,65 +85,59 @@ export class PrismaInstagramTokenStore implements IInstagramTokenStore {
     const facebookPageIdClean = cleanOptString(facebookPageId);
     const grantedScopesClean = cleanOptString(grantedScopes);
 
-    // ✅ FIX: não usa upsert com unique composto (que pode não existir no Prisma Client)
-    // Procura a conta mais recente do mesmo (userId, instagramId).
-    const existing = await prisma.instagramAccount.findFirst({
-      where: {
-        userId,
-        instagramId: igUserId,
-      },
-      orderBy: { updatedAt: "desc" },
-      select: { id: true },
-    });
-
-    // Monta o "data" do update com cuidado para não zerar accessToken sem querer.
-    const updateData: any = {
-      instagramUserName: usernameClean,
+    /**
+     * ✅ Update data:
+     * - Não zera accessToken se não vier um novo
+     * - pageAccessToken: permite limpar pra null quando vier explicitamente
+     */
+    const updateData: Record<string, any> = {
+      username: usernameClean,
       accountType: accountTypeClean,
-
-      // ✅ se accessTokenClean for null, NÃO altera accessToken existente
-      ...(accessTokenClean ? { accessToken: accessTokenClean } : {}),
-
-      // ✅ pageAccessToken pode ser setado pra null (se quiser limpar)
-      pageAccessToken: pageAccessTokenClean,
-
       facebookPageId: facebookPageIdClean,
-      accessTokenExpiresAt: expiresAt ?? null,
+      expiresAt: expiresAt ?? null,
       lastRefreshedAt: lastRefreshedAt ?? null,
-
       ...(grantedScopesClean ? { grantedScopes: grantedScopesClean } : {}),
-
       ...(typeof isConnected === "boolean" ? { isConnected } : {}),
     };
 
-    if (existing?.id) {
-      await prisma.instagramAccount.update({
-        where: { id: existing.id },
-        data: updateData,
-      });
-      return;
+    // só atualiza accessToken se vier (não overwrite acidental)
+    if (accessTokenClean) {
+      updateData.accessToken = accessTokenClean;
     }
 
-    // ✅ create quando não existe registro para esse (userId, instagramId)
-    await prisma.instagramAccount.create({
-      data: {
+    // pageAccessToken: se o campo existir no input, permite setar null (limpar)
+    if (hasOwn(input as any, "pageAccessToken")) {
+      updateData.pageAccessToken = pageAccessTokenClean;
+    } else if (pageAccessTokenClean) {
+      // fallback: se veio valor, seta
+      updateData.pageAccessToken = pageAccessTokenClean;
+    }
+
+    /**
+     * ✅ Upsert usando unique composto do schema:
+     * @@unique([userId, igUserId], name: "userId_igUserId")
+     *
+     * No Prisma Client, isso vira: where: { userId_igUserId: { userId, igUserId } }
+     */
+    await prisma.instagramAccount.upsert({
+      where: {
+        userId_igUserId: {
+          userId,
+          igUserId,
+        },
+      },
+      update: updateData,
+      create: {
         userId,
-        instagramId: igUserId,
-
-        instagramUserName: usernameClean,
+        igUserId,
+        username: usernameClean,
         accountType: accountTypeClean,
-
-        // aqui precisa salvar pelo menos um token
+        facebookPageId: facebookPageIdClean,
+        expiresAt: expiresAt ?? null,
+        lastRefreshedAt: lastRefreshedAt ?? null,
+        grantedScopes: grantedScopesClean,
         accessToken: accessTokenClean,
         pageAccessToken: pageAccessTokenClean,
-
-        facebookPageId: facebookPageIdClean,
-        accessTokenExpiresAt: expiresAt ?? null,
-        lastRefreshedAt: lastRefreshedAt ?? null,
-
-        grantedScopes: grantedScopesClean,
-
-        // ✅ default seguro: se não vier, marca conectado
         isConnected: typeof isConnected === "boolean" ? isConnected : true,
       },
     });

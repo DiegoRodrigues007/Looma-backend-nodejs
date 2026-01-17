@@ -7,22 +7,11 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-//
-// ==========================
-// ✅ ENUMS
-// ==========================
-// Evita plataforma errada e facilita filtros/queries
-//
 enum MetricsPlatform {
   instagram
   youtube
 }
 
-//
-// ==========================
-// 👤 USER
-// ==========================
-//
 model User {
   id           String   @id @default(uuid())
   email        String   @unique
@@ -32,46 +21,34 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  // ==========================
+  activeInstagramAccountId String?
+
+  activeInstagramAccount InstagramAccount? @relation("UserActiveInstagramAccount", fields: [activeInstagramAccountId], references: [id], onDelete: SetNull)
 
   instagramAccounts   InstagramAccount[]
   youtubeAccounts     YouTubeAccount[]
-  instagramCandidates InstagramCandidate[] // ✅ pendentes pós OAuth
+  instagramCandidates InstagramCandidate[]
 
-  // ✅ histórico de métricas (diário)
   metricsSnapshots MetricsSnapshot[]
+  refreshTokens    RefreshToken[]
 
-  // ✅ refresh tokens (sessão do app)
-  refreshTokens RefreshToken[]
-
-  // ✅ Posts / backfill
   instagramPosts        InstagramPost[]
   instagramBackfillJobs InstagramBackfillJob[]
 
-  // ✅ histórico followers diário (usado no metrics)
   instagramFollowersDaily InstagramFollowersDaily[]
 
   @@map("User")
 }
 
-//
-// ==========================
-// 🔐 REFRESH TOKENS (APP AUTH)
-// ==========================
-//
 model RefreshToken {
   id     String @id @default(uuid())
   userId String
 
-  // ✅ armazene SOMENTE o hash (sha256 por exemplo)
-  tokenHash String @unique
-
+  tokenHash String    @unique
   expiresAt DateTime
   revokedAt DateTime?
 
   createdAt DateTime @default(now())
-
-  // ==========================
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -80,124 +57,79 @@ model RefreshToken {
   @@map("RefreshTokens")
 }
 
-//
-// ==========================
-// ✅ INSTAGRAM CANDIDATES (PÓS OAUTH, ANTES DE SELECIONAR)
-// ==========================
-// Guarda as páginas/contas possíveis que vieram do OAuth.
-// O front usa isso para mostrar a lista e o usuário escolher qual conectar.
-//
 model InstagramCandidate {
   id String @id @default(uuid())
 
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  // ✅ id que o front usa pra selecionar (ex: igsel_xxx)
   selectionId String
 
-  // ✅ IG user id (Graph)
-  igUserId String
-
-  // username do IG (quando disponível)
-  username String?
-
-  // BUSINESS | CREATOR | etc (quando disponível)
+  igUserId    String
+  username    String?
   accountType String?
 
-  // página que “carrega” a conexão
   facebookPageId   String
   facebookPageName String?
 
-  // token da página (necessário para endpoints IG)
   pageAccessToken String
+  source          String
 
-  // de onde veio (instagram_business_account | connected_instagram_account)
-  source String
-
-  // ✅ quando confirmar, a gente pode apontar pra conta conectada
   instagramAccountId String?
-  instagramAccount   InstagramAccount? @relation(fields: [instagramAccountId], references: [id], onDelete: SetNull)
+  instagramAccount   InstagramAccount? @relation("CandidateToConnectedAccount", fields: [instagramAccountId], references: [id], onDelete: SetNull)
 
-  // controle
   createdAt  DateTime  @default(now())
   selectedAt DateTime?
 
-  // ✅ importante: evita conflito global de selectionId entre usuários/testes
   @@unique([userId, selectionId], name: "userId_selectionId")
   @@index([userId, createdAt])
   @@index([userId, selectionId, createdAt])
   @@map("InstagramCandidates")
 }
 
-//
-// ==========================
-// 📷 INSTAGRAM ACCOUNT
-// ==========================
-// ✅ MULTI-CONTA:
-// - unique composto (userId, instagramId)
-//
 model InstagramAccount {
   id String @id @default(uuid())
 
-  // id do usuário IG (Graph)
-  instagramId       String
-  instagramUserName String?
-  accountType       String? // BUSINESS | CREATOR | etc
-  facebookPageId    String?
+  igUserId    String
+  username    String?
+  accountType String?
 
-  accessToken          String?
-  pageAccessToken      String?
-  accessTokenExpiresAt DateTime?
-  grantedScopes        String?
+  facebookPageId String?
 
-  // Controle de renovação
+  accessToken     String?
+  pageAccessToken String?
+  expiresAt       DateTime?
+  grantedScopes   String?
+
   lastRefreshedAt DateTime?
-
-  // Flag de vínculo ativo
-  isConnected Boolean @default(false)
+  isConnected     Boolean   @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // ==========================
-
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  // ✅ Posts pertencem a uma conta específica
-  posts InstagramPost[]
+  activeForUsers User[] @relation("UserActiveInstagramAccount")
 
-  // ✅ Jobs de backfill por conta
-  backfillJobs InstagramBackfillJob[]
+  posts          InstagramPost[]           @relation("InstagramAccountToPosts")
+  backfillJobs   InstagramBackfillJob[]
+  candidates     InstagramCandidate[]      @relation("CandidateToConnectedAccount")
+  followersDaily InstagramFollowersDaily[] @relation("InstagramAccountToFollowersDaily")
 
-  // ✅ candidates ligados (opcional)
-  candidates InstagramCandidate[]
-
-  @@unique([userId, instagramId], name: "userId_instagramId")
+  @@unique([userId, igUserId], name: "userId_igUserId")
   @@index([userId])
-  @@index([instagramId])
+  @@index([igUserId])
   @@map("InstagramAccounts")
 }
 
-//
-// ==========================
-// ▶️ YOUTUBE ACCOUNT
-// ==========================
-//
 model YouTubeAccount {
   id String @id @default(uuid())
 
-  // ==========================
-  // Canal
-  // ==========================
   channelId     String  @unique
   channelTitle  String?
   channelHandle String?
 
-  // ==========================
-  // Tokens OAuth (YouTube)
-  // ==========================
   accessToken   String?
   refreshToken  String?
   expiresAt     DateTime?
@@ -205,13 +137,10 @@ model YouTubeAccount {
 
   lastRefreshedAt DateTime?
 
-  // Flag de vínculo ativo
   isConnected Boolean @default(false)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-
-  // ==========================
 
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -220,17 +149,11 @@ model YouTubeAccount {
   @@map("YouTubeAccounts")
 }
 
-//
-// ==========================
-// 📊 MÉTRICAS HISTÓRICAS (DIÁRIO)
-// ==========================
-//
 model MetricsSnapshot {
   id       String          @id @default(uuid())
   userId   String
   platform MetricsPlatform
 
-  // ✅ só a data (YYYY-MM-DD) no Postgres
   date DateTime @db.Date
 
   followers         Int   @default(0)
@@ -241,8 +164,6 @@ model MetricsSnapshot {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // ==========================
-
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, platform, date], name: "userId_platform_date")
@@ -250,15 +171,11 @@ model MetricsSnapshot {
   @@map("MetricsSnapshots")
 }
 
-//
-// ==========================
-// ✅ FOLLOWERS DIÁRIO (para série no gráfico)
-//
 model InstagramFollowersDaily {
   id String @id @default(uuid())
 
-  userId   String
-  igUserId String
+  userId             String
+  instagramAccountId String
 
   day       DateTime @db.Date
   followers Int      @default(0)
@@ -266,29 +183,21 @@ model InstagramFollowersDaily {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // ==========================
-
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@unique([userId, igUserId, day], name: "userId_igUserId_day")
-  @@index([userId, igUserId, day])
+  instagramAccount InstagramAccount @relation("InstagramAccountToFollowersDaily", fields: [instagramAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([instagramAccountId, day], name: "instagramAccountId_day")
+  @@index([userId, instagramAccountId, day])
   @@map("InstagramFollowersDaily")
 }
 
-//
-// ==========================
-// ✅ POSTS DO INSTAGRAM (CATÁLOGO)
-// ==========================
-// - post pertence a UMA InstagramAccount
-// - igMediaId unique por (instagramAccountId, igMediaId)
-//
 model InstagramPost {
   id String @id @default(uuid())
 
   userId             String
   instagramAccountId String
 
-  // id do post na Graph API
   igMediaId String
 
   mediaType   String?
@@ -299,16 +208,14 @@ model InstagramPost {
   likeCount     Int @default(0)
   commentsCount Int @default(0)
 
-  // opcional: thumbs/cache
   thumb String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // ==========================
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  user             User             @relation(fields: [userId], references: [id], onDelete: Cascade)
-  instagramAccount InstagramAccount @relation(fields: [instagramAccountId], references: [id], onDelete: Cascade)
+  instagramAccount InstagramAccount @relation("InstagramAccountToPosts", fields: [instagramAccountId], references: [id], onDelete: Cascade)
 
   metrics InstagramPostMetric[]
   results InstagramPostInsightResult[]
@@ -319,11 +226,6 @@ model InstagramPost {
   @@map("InstagramPosts")
 }
 
-//
-// ==========================
-// ✅ MÉTRICAS DO POST (INSIGHTS)
-// ==========================
-//
 model InstagramPostMetric {
   id       String   @id @default(uuid())
   postId   String
@@ -339,10 +241,7 @@ model InstagramPostMetric {
 
   totalInteractions Int @default(0)
 
-  // opcional: guarda payload bruto pra debug
   raw Json?
-
-  // ==========================
 
   post InstagramPost @relation(fields: [postId], references: [id], onDelete: Cascade)
 
@@ -350,17 +249,13 @@ model InstagramPostMetric {
   @@map("InstagramPostMetrics")
 }
 
-//
-// ==========================
-// ✅ RESULTADO DO MOTOR (POS/NEG/ESTÁVEL + JSON)
-//
 model InstagramPostInsightResult {
   id String @id @default(uuid())
 
   postId             String
   baselineWindowDays Int
 
-  verdict String // positive | negative | stable
+  verdict String
   score   Float?
 
   evidence Json
@@ -370,8 +265,6 @@ model InstagramPostInsightResult {
 
   computedAt DateTime @default(now())
 
-  // ==========================
-
   post InstagramPost @relation(fields: [postId], references: [id], onDelete: Cascade)
 
   @@unique([postId, baselineWindowDays], name: "postId_baselineWindowDays")
@@ -379,13 +272,6 @@ model InstagramPostInsightResult {
   @@map("InstagramPostInsightResults")
 }
 
-//
-// ==========================
-// ✅ JOB DE BACKFILL (FILA NO POSTGRES)
-// ==========================
-// ✅ AGORA OBRIGATÓRIO: instagramAccountId
-// (multi-conta exige isso pra não misturar posts)
-//
 model InstagramBackfillJob {
   id String @id @default(uuid())
 
@@ -393,7 +279,7 @@ model InstagramBackfillJob {
 
   instagramAccountId String
 
-  status String  @default("queued") // queued|running|done|error
+  status String  @default("queued")
   cursor String?
 
   importedCount  Int @default(0)
@@ -405,8 +291,6 @@ model InstagramBackfillJob {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-
-  // ==========================
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 

@@ -1,8 +1,79 @@
+// src/presentation/http/routes/instagramBackfillRouter.ts
 import { Router } from "express";
 import { prisma } from "../../../infrastructure/db/prismaClient";
 import { authMiddleware } from "../middlewares/authMiddleware";
 
 const router = Router();
+
+function getUserId(req: any): string | null {
+  const v =
+    req?.user?.sub ||
+    req?.user?.id ||
+    req?.user?.userId ||
+    req?.userId ||
+    null;
+
+  if (typeof v === "string" && v.trim()) return v.trim();
+  if (typeof v === "number") return String(v);
+  return null;
+}
+
+/**
+ * Resolve a conta que o backfill vai usar:
+ * 1) body.instagramAccountId (se veio)
+ * 2) user.activeInstagramAccountId
+ * 3) conta conectada mais recente
+ */
+async function resolveInstagramAccountId(opts: {
+  userId: string;
+  requestedId?: string | undefined;
+}): Promise<string | null> {
+  const { userId, requestedId } = opts;
+
+  if (requestedId) {
+    const acc = await prisma.instagramAccount.findFirst({
+      where: {
+        id: requestedId,
+        userId,
+        isConnected: true,
+        OR: [{ pageAccessToken: { not: null } }, { accessToken: { not: null } }],
+      },
+      select: { id: true },
+    });
+    return acc?.id ?? null;
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { activeInstagramAccountId: true },
+  });
+
+  if (user?.activeInstagramAccountId) {
+    const acc = await prisma.instagramAccount.findFirst({
+      where: {
+        id: user.activeInstagramAccountId,
+        userId,
+        isConnected: true,
+        OR: [{ pageAccessToken: { not: null } }, { accessToken: { not: null } }],
+      },
+      select: { id: true },
+    });
+
+    if (acc?.id) return acc.id;
+  }
+
+  const latest = await prisma.instagramAccount.findFirst({
+    where: {
+      userId,
+      isConnected: true,
+      OR: [{ pageAccessToken: { not: null } }, { accessToken: { not: null } }],
+    },
+    orderBy: { updatedAt: "desc" },
+    select: { id: true },
+  });
+
+  return latest?.id ?? null;
+}
 
 /**
  * @openapi
@@ -19,56 +90,33 @@ const router = Router();
  *       ⚠️ O processamento ocorre de forma assíncrona (worker).
  *     security:
  *       - bearerAuth: []
- *     requestBody:
- *       required: false
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               instagramAccountId:
- *                 type: string
- *                 description: ID da conta do Instagram (caso o usuário tenha múltiplas)
- *               maxPosts:
- *                 type: integer
- *                 example: 300
- *                 description: Limite máximo de posts a importar (opcional, para testes)
- *     responses:
- *       200:
- *         description: Job criado ou já existente
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 ok:
- *                   type: boolean
- *                 jobId:
- *                   type: string
- *                 status:
- *                   type: string
- *                   enum: [queued, running, done, error]
- *                 importedCount:
- *                   type: integer
- *                 processedCount:
- *                   type: integer
- *       400:
- *         description: Conta do Instagram inválida ou não conectada
- *       401:
- *         description: Não autorizado
  */
 router.post("/backfill/start", authMiddleware, async (req, res) => {
-  const userId = (req as any).user?.sub as string;
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ ok: false, error: "Não autorizado" });
 
-  const instagramAccountId =
-    (req.body?.instagramAccountId as string | undefined) ?? undefined;
+  const requestedAccountId = String(req.body?.instagramAccountId ?? "").trim() || undefined;
 
-  // evita duplicar job ativo
+  // ✅ resolve conta (obrigatória no schema)
+  const instagramAccountId = await resolveInstagramAccountId({
+    userId,
+    requestedId: requestedAccountId,
+  });
+
+  if (!instagramAccountId) {
+    return res.status(400).json({
+      ok: false,
+      error:
+        "Nenhuma conta Instagram conectada encontrada (ou instagramAccountId inválido).",
+    });
+  }
+
+  // ✅ evita duplicar job ativo (agora sempre por conta)
   const existing = await prisma.instagramBackfillJob.findFirst({
     where: {
       userId,
+      instagramAccountId,
       status: { in: ["queued", "running"] },
-      ...(instagramAccountId ? { instagramAccountId } : {}),
     },
     orderBy: { createdAt: "desc" },
   });
@@ -80,33 +128,26 @@ router.post("/backfill/start", authMiddleware, async (req, res) => {
       status: existing.status,
       importedCount: existing.importedCount,
       processedCount: existing.processedCount,
+      instagramAccountId: existing.instagramAccountId,
     });
-  }
-
-  // valida conta específica (se enviada)
-  if (instagramAccountId) {
-    const acc = await prisma.instagramAccount.findFirst({
-      where: { id: instagramAccountId, userId, isConnected: true },
-      select: { id: true },
-    });
-
-    if (!acc) {
-      return res.status(400).json({
-        ok: false,
-        error: "InstagramAccount inválida ou não conectada",
-      });
-    }
   }
 
   const job = await prisma.instagramBackfillJob.create({
     data: {
       userId,
-      instagramAccountId: instagramAccountId ?? null,
+      instagramAccountId, // ✅ obrigatório
       status: "queued",
+      // opcional: maxPosts pra teste (se você usa no worker, pode salvar num campo próprio)
+      // maxPosts: Number(req.body?.maxPosts) || null,
     },
   });
 
-  return res.json({ ok: true, jobId: job.id, status: job.status });
+  return res.json({
+    ok: true,
+    jobId: job.id,
+    status: job.status,
+    instagramAccountId: job.instagramAccountId,
+  });
 });
 
 /**
@@ -121,68 +162,33 @@ router.post("/backfill/start", authMiddleware, async (req, res) => {
  *       incluindo progresso, erros e timestamps.
  *     security:
  *       - bearerAuth: []
- *     parameters:
- *       - in: query
- *         name: instagramAccountId
- *         required: false
- *         schema:
- *           type: string
- *         description: ID da conta do Instagram (para usuários com múltiplas contas)
- *     responses:
- *       200:
- *         description: Status do backfill
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 ok:
- *                   type: boolean
- *                 jobId:
- *                   type: string
- *                 status:
- *                   type: string
- *                   enum: [queued, running, done, error, none]
- *                 importedCount:
- *                   type: integer
- *                 processedCount:
- *                   type: integer
- *                 cursor:
- *                   type: string
- *                   nullable: true
- *                 startedAt:
- *                   type: string
- *                   format: date-time
- *                   nullable: true
- *                 finishedAt:
- *                   type: string
- *                   format: date-time
- *                   nullable: true
- *                 lastError:
- *                   type: string
- *                   nullable: true
- *                 instagramAccountId:
- *                   type: string
- *                   nullable: true
- *       401:
- *         description: Não autorizado
  */
 router.get("/backfill/status", authMiddleware, async (req, res) => {
-  const userId = (req as any).user?.sub as string;
+  const userId = getUserId(req);
+  if (!userId) return res.status(401).json({ ok: false, error: "Não autorizado" });
 
-  const instagramAccountId =
-    (req.query?.instagramAccountId as string | undefined) ?? undefined;
+  const requestedAccountId = String(req.query?.instagramAccountId ?? "").trim() || undefined;
+
+  // ✅ se vier query, valida; se não vier, tenta resolver igual ao start
+  const instagramAccountId = await resolveInstagramAccountId({
+    userId,
+    requestedId: requestedAccountId,
+  });
+
+  if (!instagramAccountId) {
+    return res.json({ ok: true, status: "none" });
+  }
 
   const job = await prisma.instagramBackfillJob.findFirst({
     where: {
       userId,
-      ...(instagramAccountId ? { instagramAccountId } : {}),
+      instagramAccountId,
     },
     orderBy: { createdAt: "desc" },
   });
 
   if (!job) {
-    return res.json({ ok: true, status: "none" });
+    return res.json({ ok: true, status: "none", instagramAccountId });
   }
 
   return res.json({
