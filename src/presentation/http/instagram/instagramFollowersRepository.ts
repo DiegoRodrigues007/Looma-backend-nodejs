@@ -9,19 +9,18 @@ function dayEndUtc(ymdStr: string) {
   return new Date(`${ymdStr}T23:59:59.999Z`);
 }
 
-
 export async function getFollowersSeriesFromDb(params: {
   userId: string;
-  igUserId: string;
-  from: string; 
-  to: string; 
+  instagramAccountId: string;
+  from: string;
+  to: string;
 }): Promise<Record<string, number>> {
-  const { userId, igUserId, from, to } = params;
+  const { userId, instagramAccountId, from, to } = params;
 
   const rows = await prisma.instagramFollowersDaily.findMany({
     where: {
       userId,
-      igUserId,
+      instagramAccountId,
       day: {
         gte: dayStartUtc(from),
         lte: dayEndUtc(to),
@@ -40,16 +39,16 @@ export async function getFollowersSeriesFromDb(params: {
 
 export async function saveTodayFollowersSnapshot(params: {
   userId: string;
-  igUserId: string;
+  instagramAccountId: string;
   followers: number;
 }): Promise<void> {
-  const { userId, igUserId, followers } = params;
+  const { userId, instagramAccountId, followers } = params;
 
   const today = ymd(new Date());
   const day = dayStartUtc(today);
 
   const existing = await prisma.instagramFollowersDaily.findFirst({
-    where: { userId, igUserId, day },
+    where: { userId, instagramAccountId, day },
     select: { id: true },
   });
 
@@ -64,7 +63,7 @@ export async function saveTodayFollowersSnapshot(params: {
   await prisma.instagramFollowersDaily.create({
     data: {
       userId,
-      igUserId,
+      instagramAccountId,
       day,
       followers,
     },

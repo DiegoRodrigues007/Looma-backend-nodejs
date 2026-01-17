@@ -1143,9 +1143,10 @@ export class InstagramAuthController {
       const currentFollowers = toFiniteNumber(profileRes.data?.followers_count);
       const username = String(profileRes.data?.username ?? row.username ?? "");
 
+      // ✅ FIX: followersDaily agora é por instagramAccountId (multi-conta)
       await saveTodayFollowersSnapshot({
         userId,
-        igUserId,
+        instagramAccountId: row.id,
         followers: currentFollowers,
       });
 
@@ -1178,9 +1179,10 @@ export class InstagramAuthController {
       const reachByDay = mapInsightByDayRobust(reachData, "reach", days, 0);
       const profileViewsByDay = mapInsightByDayRobust(profileViewsData, "profile_views", days, 0);
 
+      // ✅ FIX: buscar histórico por instagramAccountId (multi-conta)
       const followersRaw = await getFollowersSeriesFromDb({
         userId,
-        igUserId,
+        instagramAccountId: row.id,
         from,
         to,
       });

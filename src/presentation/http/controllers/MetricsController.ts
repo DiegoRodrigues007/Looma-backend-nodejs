@@ -29,16 +29,16 @@ export class MetricsController {
       where: { userId, isConnected: true },
       orderBy: { updatedAt: "desc" }, // ✅ pega sempre a mais recente
       select: {
-        instagramId: true,
+        igUserId: true, // ✅ FIX: era instagramId
         accessToken: true,
         pageAccessToken: true,
       },
     });
 
-    const instagramId = account?.instagramId ?? null;
+    const igUserId = account?.igUserId ?? null;
     const accessToken = (account?.pageAccessToken ?? account?.accessToken) ?? null;
 
-    return { instagramId, accessToken };
+    return { igUserId, accessToken };
   }
 
   /**
@@ -68,9 +68,9 @@ export class MetricsController {
 
       const platform: MetricsPlatform = "instagram";
 
-      const { instagramId, accessToken } = await this.getConnectedInstagramAccount(userId);
+      const { igUserId, accessToken } = await this.getConnectedInstagramAccount(userId);
 
-      if (!instagramId || !accessToken) {
+      if (!igUserId || !accessToken) {
         return res.status(400).json({
           message: "Instagram not connected or missing access token",
         });
@@ -92,7 +92,7 @@ export class MetricsController {
       }
 
       // ✅ Busca métricas e salva
-      const metrics = await InstagramMetricsService.fetchDailyMetrics(instagramId, accessToken);
+      const metrics = await InstagramMetricsService.fetchDailyMetrics(igUserId, accessToken);
 
       await repo.save(
         new MetricsSnapshot(
@@ -131,15 +131,15 @@ export class MetricsController {
 
       const platform: MetricsPlatform = "instagram";
 
-      const { instagramId, accessToken } = await this.getConnectedInstagramAccount(userId);
+      const { igUserId, accessToken } = await this.getConnectedInstagramAccount(userId);
 
-      if (!instagramId || !accessToken) {
+      if (!igUserId || !accessToken) {
         return res.status(400).json({
           message: "Instagram not connected or missing access token",
         });
       }
 
-      const live = await InstagramMetricsService.fetchDailyMetrics(instagramId, accessToken);
+      const live = await InstagramMetricsService.fetchDailyMetrics(igUserId, accessToken);
 
       const repo = new PrismaMetricsSnapshotRepository();
 
@@ -195,15 +195,15 @@ export class MetricsController {
       const daysRaw = Number(req.query.days ?? 7);
       const days = Number.isFinite(daysRaw) && daysRaw > 0 ? Math.floor(daysRaw) : 7;
 
-      const { instagramId, accessToken } = await this.getConnectedInstagramAccount(userId);
+      const { igUserId, accessToken } = await this.getConnectedInstagramAccount(userId);
 
-      if (!instagramId || !accessToken) {
+      if (!igUserId || !accessToken) {
         return res.status(400).json({
           message: "Instagram not connected or missing access token",
         });
       }
 
-      const live = await InstagramMetricsService.fetchDailyMetrics(instagramId, accessToken);
+      const live = await InstagramMetricsService.fetchDailyMetrics(igUserId, accessToken);
 
       const repo = new PrismaMetricsSnapshotRepository();
 
