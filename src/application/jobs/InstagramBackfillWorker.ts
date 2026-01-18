@@ -124,7 +124,8 @@ export function startInstagramBackfillWorker(opts: WorkerOptions = {}) {
     });
 
     try {
-      // pega conta IG (multi-conta suportada)
+      // ✅ pega conta IG (multi-conta suportada)
+      // IMPORTANTE: no seu schema o campo é igUserId (e não instagramId)
       const account = await prisma.instagramAccount.findFirst({
         where: {
           userId: job.userId,
@@ -134,22 +135,47 @@ export function startInstagramBackfillWorker(opts: WorkerOptions = {}) {
         orderBy: { updatedAt: "desc" },
         select: {
           id: true,
-          instagramId: true,
+          igUserId: true, // ✅ CORRETO
           accessToken: true,
           pageAccessToken: true,
         },
       });
 
-      const igUserId = account?.instagramId ? String(account.instagramId) : null;
-      const accessToken = (account?.pageAccessToken ?? account?.accessToken) ?? null;
+      const igUserId = account?.igUserId ? String(account.igUserId) : null;
 
-      if (!igUserId || !accessToken) {
-        await failJob(job.id, "Instagram não conectado ou token/instagramId ausente");
-        log("[IG BACKFILL] job error: missing creds", { jobId: job.id });
+      // ✅ prioriza pageAccessToken (melhor pros endpoints IG), senão accessToken
+      const accessToken =
+        (account?.pageAccessToken ?? account?.accessToken) ?? null;
+
+      if (!account) {
+        await failJob(job.id, "InstagramAccount não encontrado para o usuário/job");
+        log("[IG BACKFILL] job error: account not found", {
+          jobId: job.id,
+          userId: job.userId,
+          instagramAccountId: job.instagramAccountId,
+        });
         return;
       }
 
-      // garante que o job está amarrado à conta (se não veio)
+      if (!igUserId) {
+        await failJob(job.id, "igUserId ausente na conta do Instagram");
+        log("[IG BACKFILL] job error: missing igUserId", {
+          jobId: job.id,
+          instagramAccountId: account.id,
+        });
+        return;
+      }
+
+      if (!accessToken) {
+        await failJob(job.id, "Token ausente (pageAccessToken/accessToken) na conta do Instagram");
+        log("[IG BACKFILL] job error: missing accessToken", {
+          jobId: job.id,
+          instagramAccountId: account.id,
+        });
+        return;
+      }
+
+      // ✅ garante que o job está amarrado à conta (se não veio)
       if (!job.instagramAccountId && account?.id) {
         await prisma.instagramBackfillJob.update({
           where: { id: job.id },
@@ -158,8 +184,6 @@ export function startInstagramBackfillWorker(opts: WorkerOptions = {}) {
       }
 
       // ✅ Executa o service
-      // (Se você quiser popular instagramPostInsightResults durante o backfill,
-      //  você pode evoluir o InstagramBackfillService pra chamar opts.onPostImported)
       await service.run({
         userId: job.userId,
         instagramAccountId: account?.id ?? null,
@@ -175,8 +199,6 @@ export function startInstagramBackfillWorker(opts: WorkerOptions = {}) {
         onPostImported: opts.onPostImported,
       } as any);
 
-      // ✅ Se o service não marcar como done, a gente garante aqui (opcional)
-      // Não vou forçar "done" porque talvez seu service já finalize com cursor/status.
       log("[IG BACKFILL] job finished (service returned)", { jobId: job.id });
 
       // reset backoff em sucesso
@@ -237,7 +259,9 @@ export function startInstagramBackfillWorker(opts: WorkerOptions = {}) {
   }
 
   loop().catch((e) => {
-    log("[IG BACKFILL] fatal loop error", { error: String(e?.message ?? e ?? "FATAL") });
+    log("[IG BACKFILL] fatal loop error", {
+      error: String(e?.message ?? e ?? "FATAL"),
+    });
   });
 
   return {

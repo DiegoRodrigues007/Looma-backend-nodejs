@@ -21,11 +21,13 @@ function getAuthenticatedUserId(req: Request): string | null {
     anyReq?.userId ||
     null;
 
-  if (typeof fromUser === "string" && fromUser.trim().length > 0) return fromUser.trim();
+  if (typeof fromUser === "string" && fromUser.trim().length > 0)
+    return fromUser.trim();
   if (typeof fromUser === "number") return String(fromUser);
 
   const fromHeader = req.header("x-user-id");
-  if (typeof fromHeader === "string" && fromHeader.trim().length > 0) return fromHeader.trim();
+  if (typeof fromHeader === "string" && fromHeader.trim().length > 0)
+    return fromHeader.trim();
 
   return null;
 }
@@ -43,6 +45,12 @@ function getAuthenticatedUserId(req: Request): string | null {
  *     security:
  *       - bearerAuth: []
  *     parameters:
+ *       - in: query
+ *         name: instagramAccountId
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: Filtra posts pela conta ativa do Instagram (recomendado em multi-conta)
  *       - in: query
  *         name: from
  *         required: false
@@ -74,66 +82,6 @@ function getAuthenticatedUserId(req: Request): string | null {
  *     responses:
  *       200:
  *         description: Lista de posts do banco
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 ok:
- *                   type: boolean
- *                 source:
- *                   type: string
- *                   example: "database"
- *                 total:
- *                   type: integer
- *                 posts:
- *                   type: array
- *                   items:
- *                     type: object
- *                     properties:
- *                       id:
- *                         type: string
- *                       igMediaId:
- *                         type: string
- *                       mediaType:
- *                         type: string
- *                         nullable: true
- *                       publishedAt:
- *                         type: string
- *                         format: date-time
- *                       caption:
- *                         type: string
- *                         nullable: true
- *                       permalink:
- *                         type: string
- *                         nullable: true
- *                       likeCount:
- *                         type: integer
- *                       commentsCount:
- *                         type: integer
- *                       latestMetrics:
- *                         type: object
- *                         nullable: true
- *                         properties:
- *                           pulledAt:
- *                             type: string
- *                             format: date-time
- *                           reach:
- *                             type: integer
- *                           likes:
- *                             type: integer
- *                           comments:
- *                             type: integer
- *                           shares:
- *                             type: integer
- *                           saves:
- *                             type: integer
- *                           plays:
- *                             type: integer
- *                           videoViews:
- *                             type: integer
- *                           totalInteractions:
- *                             type: integer
  *       401:
  *         description: Não autorizado
  */
@@ -143,14 +91,42 @@ export async function listInstagramPosts(req: Request, res: Response) {
     return res.status(401).json({ ok: false, message: "Não autenticado" });
   }
 
+  const instagramAccountId =
+    typeof req.query.instagramAccountId === "string"
+      ? req.query.instagramAccountId.trim()
+      : "";
+
   const from = typeof req.query.from === "string" ? req.query.from.trim() : "";
   const to = typeof req.query.to === "string" ? req.query.to.trim() : "";
   const type = typeof req.query.type === "string" ? req.query.type.trim() : "";
-  const limitRaw = typeof req.query.limit === "string" ? Number(req.query.limit) : undefined;
 
-  const limit = Number.isFinite(limitRaw) ? Math.min(200, Math.max(1, limitRaw!)) : 50;
+  const limitRaw =
+    typeof req.query.limit === "string" ? Number(req.query.limit) : undefined;
 
+  const limit = Number.isFinite(limitRaw)
+    ? Math.min(200, Math.max(1, limitRaw!))
+    : 50;
+
+  // ✅ filtro base: sempre por userId
   const where: any = { userId };
+
+  // ✅ multi-conta: filtra por instagramAccountId quando vier
+  if (instagramAccountId) {
+    // opcional: valida se a conta é do user (evita "ver posts de outro user")
+    const owned = await prisma.instagramAccount.findFirst({
+      where: { id: instagramAccountId, userId },
+      select: { id: true },
+    });
+
+    if (!owned) {
+      return res.status(404).json({
+        ok: false,
+        message: "instagramAccountId inválido ou não pertence ao usuário",
+      });
+    }
+
+    where.instagramAccountId = instagramAccountId;
+  }
 
   if (type) where.mediaType = type;
 
@@ -187,6 +163,7 @@ export async function listInstagramPosts(req: Request, res: Response) {
     ok: true,
     source: "database",
     total: posts.length,
+    instagramAccountId: instagramAccountId || null,
     posts: posts.map((p) => ({
       id: p.id,
       igMediaId: p.igMediaId,

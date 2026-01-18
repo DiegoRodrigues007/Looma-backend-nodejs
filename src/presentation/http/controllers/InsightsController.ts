@@ -45,8 +45,9 @@ function addDays(date: Date, days: number) {
 }
 
 function clampInt(n: number, min: number, max: number, fallback: number) {
-  if (!Number.isFinite(n)) return fallback;
-  const v = Math.floor(n);
+  const num = Number(n);
+  if (!Number.isFinite(num)) return fallback;
+  const v = Math.floor(num);
   return Math.min(Math.max(v, min), max);
 }
 
@@ -93,8 +94,6 @@ function normalizeScore(score: any): number | null {
 /**
  * Prisma: evidence/why/improve/continue são Json obrigatórios.
  * Então aqui garantimos que nunca será null/undefined.
- *
- * Se você preferir objeto ao invés de array, pode trocar [] por {}.
  */
 function ensureJson(value: any, fallback: any) {
   if (value === null || value === undefined) return fallback;
@@ -111,22 +110,28 @@ export class InsightsController {
 
   /**
    * ✅ Busca credenciais do IG corretamente pela tabela instagramAccount
+   * - suporta multi-conta via query param instagramAccountId
    * - usa pageAccessToken se existir (normalmente é o que dá mais certo)
    */
   private async getConnectedInstagramCreds(
-    userId: string
+    userId: string,
+    instagramAccountId?: string | null
   ): Promise<IgCreds | null> {
     const account = await prisma.instagramAccount.findFirst({
-      where: { userId, isConnected: true },
+      where: {
+        userId,
+        isConnected: true,
+        ...(instagramAccountId ? { id: instagramAccountId } : {}),
+      },
       orderBy: { updatedAt: "desc" },
       select: {
-        instagramId: true,
+        igUserId: true, // ✅ CORRETO (no seu schema é igUserId)
         accessToken: true,
         pageAccessToken: true,
       },
     });
 
-    const igUserId = account?.instagramId ? String(account.instagramId) : null;
+    const igUserId = account?.igUserId ? String(account.igUserId) : null;
     const token = (account?.pageAccessToken ?? account?.accessToken) ?? null;
 
     if (!igUserId || !token) return null;
@@ -135,12 +140,17 @@ export class InsightsController {
   }
 
   /**
-   * GET /api/metrics/instagram/insights/weekly?days=7
+   * GET /api/metrics/instagram/insights/weekly?days=7&instagramAccountId=...
    */
   async weeklyInstagramInsights(req: Request, res: Response) {
     try {
       const userId = getUserIdFromReq(req);
       if (!userId) return res.status(401).json({ message: "Unauthorized" });
+
+      const instagramAccountId = String(
+        (req.query.instagramAccountId ?? "") as any
+      ).trim();
+      const accountFilter = instagramAccountId ? instagramAccountId : null;
 
       const daysRaw = Number(req.query.days ?? 7);
       const days = clampInt(daysRaw, 3, 30, 7);
@@ -160,7 +170,10 @@ export class InsightsController {
       let topContent: TopContentForInsights[] | undefined;
 
       try {
-        const creds = await this.getConnectedInstagramCreds(String(userId));
+        const creds = await this.getConnectedInstagramCreds(
+          String(userId),
+          accountFilter
+        );
 
         if (creds) {
           const top = await this.topContentService.fetchTopContent({
@@ -205,7 +218,7 @@ export class InsightsController {
 
   /**
    * ✅ Tooltip do gráfico
-   * GET /api/metrics/instagram/insights/post?postId=...&baselineDays=30
+   * GET /api/metrics/instagram/insights/post?postId=...&baselineDays=30&instagramAccountId=...
    *
    * ✅ DB-FIRST + UPSERT por unique composto:
    * postId_baselineWindowDays
@@ -219,10 +232,19 @@ export class InsightsController {
       if (!postIdRaw)
         return res.status(400).json({ message: "postId is required" });
 
+      const instagramAccountId = String(
+        (req.query.instagramAccountId ?? "") as any
+      ).trim();
+      const accountFilter = instagramAccountId ? instagramAccountId : null;
+
       const baselineDaysRaw = Number(req.query.baselineDays ?? 30);
       const baselineDays = clampInt(baselineDaysRaw, 7, 90, 30);
 
-      const creds = await this.getConnectedInstagramCreds(String(userId));
+      const creds = await this.getConnectedInstagramCreds(
+        String(userId),
+        accountFilter
+      );
+
       if (!creds) {
         return res.status(400).json({
           message: "Instagram not connected or missing access token",
@@ -233,14 +255,22 @@ export class InsightsController {
        * 1) Resolver o "post interno" (InstagramPosts.id) a partir do postId do front.
        *    - Se o front mandar igMediaId (ex: "1795070..."), buscamos por igMediaId
        *    - Se mandar UUID (id interno), tentamos buscar por id
+       *
+       * ✅ importante: filtra por instagramAccountId quando vier
+       * (assim evita misturar duas contas do mesmo user)
        */
+      const postWhereBase: any = {
+        userId: String(userId),
+        ...(accountFilter ? { instagramAccountId: accountFilter } : {}),
+      };
+
       const post =
         (await prisma.instagramPost.findFirst({
-          where: { userId: String(userId), igMediaId: postIdRaw },
+          where: { ...postWhereBase, igMediaId: postIdRaw },
           select: { id: true, igMediaId: true },
         })) ??
         (await prisma.instagramPost.findFirst({
-          where: { userId: String(userId), id: postIdRaw },
+          where: { ...postWhereBase, id: postIdRaw },
           select: { id: true, igMediaId: true },
         }));
 
@@ -309,7 +339,6 @@ export class InsightsController {
       const safeScore = normalizeScore(picked.score);
 
       // JSON obrigatórios: nunca podem ser null
-      // (Escolhi array como padrão porque seu Narrated costuma ser lista de itens)
       const safeEvidence = ensureJson(picked.evidence, []);
       const safeWhy = ensureJson(picked.why, []);
       const safeImprove = ensureJson(picked.improve, []);

@@ -6,14 +6,16 @@ import { InstagramPostInsightsService } from "../../infrastructure/instagram/Ins
 /**
  * Backfill do Instagram:
  * - pagina /{igUserId}/media (posts antigos)
- * - upsert em InstagramPost
+ * - upsert em InstagramPost (multi-conta: instagramAccountId + igMediaId)
  * - busca insights por post (reach/saves/shares...) via InstagramPostInsightsService
  * - grava InstagramPostMetric (pulledAt = now)
  * - atualiza InstagramBackfillJob (cursor e progresso)
  *
  * ✅ Pensado pra rodar em worker (não em request).
  * ✅ Seguro (não quebra tudo por 1 post com erro).
- * ✅ Idempotente (na prática): não duplica métricas muito próximas para o mesmo post.
+ * ✅ Idempotente:
+ *    - Post: unique composta (instagramAccountId + igMediaId)
+ *    - Metric: atualiza se existir uma métrica recente (6h)
  */
 
 type IgMediaRow = {
@@ -53,7 +55,7 @@ function safeStr(v: any): string {
 
 type RunParams = {
   userId: string;
-  instagramAccountId?: string | null;
+  instagramAccountId?: string | null; // ✅ precisa existir (schema exige)
   igUserId: string;
   accessToken: string;
   jobId: string;
@@ -61,18 +63,11 @@ type RunParams = {
   maxPosts?: number;
   maxPages?: number;
 
-  // controle de rate-limit (ajuste fino depois)
   perPostDelayMs?: number;
   perPageDelayMs?: number;
 
-  // se você quiser continuar de um cursor salvo:
   startAfterCursor?: string | null;
 
-  /**
-   * ✅ Hook opcional:
-   * chamado assim que um post foi upsertado no banco.
-   * (use isso pra preencher instagramPostInsightResults em outro serviço)
-   */
   onPostImported?: (payload: {
     userId: string;
     instagramAccountId: string | null;
@@ -83,15 +78,11 @@ type RunParams = {
 };
 
 export class InstagramBackfillService {
-  // ✅ permite configurar a versão/base pelo .env (mantém compatível)
   private readonly graphBaseUrl =
     process.env.INSTAGRAM_GRAPH_BASE_URL ?? "https://graph.facebook.com/v21.0";
 
   private readonly postInsights = new InstagramPostInsightsService();
 
-  /**
-   * Rodar backfill para uma conta IG.
-   */
   async run(params: RunParams) {
     const {
       userId,
@@ -103,28 +94,41 @@ export class InstagramBackfillService {
       onPostImported,
     } = params;
 
+    // ✅ GARANTE multi-conta
+    const igAccId = (instagramAccountId ?? "").trim();
+    if (!igAccId) {
+      const msg =
+        "instagramAccountId é obrigatório para backfill (multi-conta).";
+      await prisma.instagramBackfillJob.update({
+        where: { id: jobId },
+        data: { status: "error", lastError: msg, finishedAt: new Date() },
+      });
+      return {
+        imported: 0,
+        processed: 0,
+        status: "error" as const,
+        error: msg,
+      };
+    }
+
     const maxPosts = clamp(params.maxPosts ?? 300, 50, 2000);
     const maxPages = clamp(params.maxPages ?? 20, 5, 80);
 
     const perPostDelayMs = clamp(params.perPostDelayMs ?? 120, 0, 5000);
     const perPageDelayMs = clamp(params.perPageDelayMs ?? 150, 0, 10000);
 
-    // campos do /media
     const fields =
       "id,caption,media_type,permalink,timestamp,like_count,comments_count";
 
-    // cursor
     let after: string | undefined = startAfterCursor ?? undefined;
 
     let page = 0;
     let imported = 0;
     let processed = 0;
 
-    // ✅ reduz “spam” de update no job
-    const PROGRESS_EVERY = 10; // atualiza contadores a cada 10 posts
+    const PROGRESS_EVERY = 10;
     let lastProgressUpdateAt = Date.now();
 
-    // ✅ marca job como running (se já estiver running, só garante startedAt)
     await prisma.instagramBackfillJob.update({
       where: { id: jobId },
       data: {
@@ -138,7 +142,6 @@ export class InstagramBackfillService {
     while (page < maxPages && imported < maxPosts) {
       page++;
 
-      // --- chama Graph API /media ---
       let resp;
       try {
         resp = await axios.get<GraphPage<IgMediaRow>>(
@@ -152,7 +155,7 @@ export class InstagramBackfillService {
             },
             timeout: 25000,
             validateStatus: () => true,
-          }
+          },
         );
       } catch (e: any) {
         const msg = String(e?.message ?? e ?? "GRAPH_REQUEST_ERROR");
@@ -163,7 +166,6 @@ export class InstagramBackfillService {
         return { imported, processed, status: "error" as const, error: msg };
       }
 
-      // se falhar, marca erro e para
       if (!resp || resp.status < 200 || resp.status >= 300) {
         const errMsg =
           (resp?.data as any)?.error?.message ||
@@ -182,11 +184,9 @@ export class InstagramBackfillService {
       const rows = Array.isArray(resp.data?.data) ? resp.data.data : [];
       if (!rows.length) break;
 
-      // cursor da próxima página (salva no final desta página)
       const nextAfter = resp.data?.paging?.cursors?.after;
       const nextCursor = nextAfter || undefined;
 
-      // processa cada post da página
       for (const m of rows) {
         if (imported >= maxPosts) break;
 
@@ -195,16 +195,20 @@ export class InstagramBackfillService {
 
         const publishedAt = new Date(String(m.timestamp));
         if (Number.isNaN(publishedAt.getTime())) {
-          // timestamp inválido? pula sem quebrar
           processed++;
           continue;
         }
 
-        // 1) upsert do post (idempotente por igMediaId)
         const post = await prisma.instagramPost.upsert({
-          where: { igMediaId },
+          where: {
+            instagramAccountId_igMediaId: {
+              instagramAccountId: igAccId,
+              igMediaId,
+            },
+          },
           create: {
             userId,
+            instagramAccountId: igAccId,
             igMediaId,
             mediaType: m.media_type ?? null,
             publishedAt,
@@ -215,6 +219,7 @@ export class InstagramBackfillService {
           },
           update: {
             userId,
+            instagramAccountId: igAccId,
             mediaType: m.media_type ?? null,
             publishedAt,
             caption: m.caption ?? null,
@@ -226,18 +231,16 @@ export class InstagramBackfillService {
 
         imported++;
 
-        // ✅ hook opcional (pra preencher instagramPostInsightResults depois)
         if (onPostImported) {
           try {
             await onPostImported({
               userId,
-              instagramAccountId: instagramAccountId ?? null,
+              instagramAccountId: igAccId,
               igUserId,
               postDbId: post.id,
               igMediaId,
             });
           } catch (e: any) {
-            // não quebra backfill
             const msg = String(e?.message ?? e ?? "ON_POST_IMPORTED_ERROR");
             await prisma.instagramBackfillJob.update({
               where: { id: jobId },
@@ -246,8 +249,6 @@ export class InstagramBackfillService {
           }
         }
 
-        // 2) busca insights do post (reach/saves/shares etc.)
-        // ⚠️ não derruba o backfill por causa de um post com erro
         try {
           const withInsights = await this.postInsights.fetchPostById({
             accessToken,
@@ -258,7 +259,6 @@ export class InstagramBackfillService {
           const saves = toInt((withInsights as any)?.saves, 0);
           const shares = toInt((withInsights as any)?.shares, 0);
 
-          // likes/comments vêm do /media (mais barato)
           const likes = toInt(m.like_count, 0);
           const comments = toInt(m.comments_count, 0);
 
@@ -267,14 +267,6 @@ export class InstagramBackfillService {
 
           const totalInteractions = likes + comments + shares + saves;
 
-          /**
-           * ✅ Idempotência prática:
-           * - se já existe uma métrica MUITO recente pro mesmo post, atualiza em vez de criar outra.
-           * - isso evita “encher” a tabela se o job rodar repetido.
-           *
-           * Ajuste aqui se quiser:
-           * - 6h = bem seguro
-           */
           const SIX_HOURS = 6 * 60 * 60 * 1000;
           const since = new Date(Date.now() - SIX_HOURS);
 
@@ -326,7 +318,6 @@ export class InstagramBackfillService {
         } finally {
           processed++;
 
-          // ✅ atualiza progresso de forma mais leve
           const now = Date.now();
           const shouldUpdateByCount = processed % PROGRESS_EVERY === 0;
           const shouldUpdateByTime = now - lastProgressUpdateAt > 3000;
@@ -342,12 +333,10 @@ export class InstagramBackfillService {
             });
           }
 
-          // rate limit simples
           if (perPostDelayMs > 0) await sleep(perPostDelayMs);
         }
       }
 
-      // ✅ salva cursor depois de processar a página (checkpoint real)
       after = nextCursor;
 
       await prisma.instagramBackfillJob.update({
@@ -360,11 +349,9 @@ export class InstagramBackfillService {
       });
 
       if (!after) break;
-
       if (perPageDelayMs > 0) await sleep(perPageDelayMs);
     }
 
-    // finaliza
     await prisma.instagramBackfillJob.update({
       where: { id: jobId },
       data: {

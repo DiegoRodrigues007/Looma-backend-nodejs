@@ -4,7 +4,6 @@ import { MetricsHistoryService } from "../services/MetricsHistoryService";
 import { InstagramMetricsService } from "../../infrastructure/instagram/InstagramMetricsService";
 import { prisma } from "../../infrastructure/db/prismaClient";
 
-
 export function startDailyMetricsSnapshotJob() {
   cron.schedule(
     "5 0 * * *",
@@ -18,8 +17,9 @@ export function startDailyMetricsSnapshotJob() {
         where: { isConnected: true },
         select: {
           userId: true,
-          instagramId: true,
+          igUserId: true, // ✅ CORRETO (no seu schema é igUserId)
           accessToken: true,
+          pageAccessToken: true, // ✅ se existir no seu model, ajuda (prioriza)
         },
       });
 
@@ -31,15 +31,21 @@ export function startDailyMetricsSnapshotJob() {
       for (const account of accounts) {
         processed++;
 
-        if (!account.instagramId || !account.accessToken) {
+        const igUserId = account.igUserId ? String(account.igUserId) : null;
+
+        // ✅ prioriza pageAccessToken (melhor pros endpoints IG), senão accessToken
+        const accessToken =
+          (account as any).pageAccessToken ?? account.accessToken ?? null;
+
+        if (!igUserId || !accessToken) {
           skipped++;
           continue;
         }
 
         try {
           const metrics = await InstagramMetricsService.fetchDailyMetrics(
-            account.instagramId,
-            account.accessToken
+            igUserId,
+            accessToken
           );
 
           // ✅ híbrido: só salva se ainda não existir snapshot do dia
@@ -54,7 +60,7 @@ export function startDailyMetricsSnapshotJob() {
         } catch (err) {
           failed++;
           console.error(
-            `❌ Snapshot failed for userId=${account.userId} instagramId=${account.instagramId}`,
+            `❌ Snapshot failed for userId=${account.userId} igUserId=${igUserId}`,
             err
           );
         }

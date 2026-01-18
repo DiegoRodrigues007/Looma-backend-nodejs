@@ -53,8 +53,44 @@ function getUserIdFromReq(req: any): string | null {
  *     tags:
  *       - Instagram
  *     summary: Inicia o login do Instagram
+ *     description: >
+ *       Inicia o fluxo OAuth do Instagram.
+ *       Se redirect=false, retorna um JSON com a URL de login. Caso contrário, redireciona (302).
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: redirect
+ *         required: false
+ *         schema:
+ *           type: boolean
+ *           default: true
+ *         description: >
+ *           Se false, retorna { url, state } em JSON ao invés de redirecionar.
+ *       - in: query
+ *         name: state
+ *         required: false
+ *         schema:
+ *           type: string
+ *           example: /settings
+ *         description: >
+ *           Caminho do frontend para retornar após o login (ex: /settings).
+ *     responses:
+ *       200:
+ *         description: Retorna a URL de login em JSON (quando redirect=false)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 url:
+ *                   type: string
+ *                 state:
+ *                   type: string
+ *       302:
+ *         description: Redireciona para a URL de login do Instagram
+ *       401:
+ *         description: Não autenticado
  */
 instagramRouter.get("/start", authMiddleware, async (req, res) => {
   const redirect = parseBool(req.query.redirect);
@@ -71,6 +107,36 @@ instagramRouter.get("/start", authMiddleware, async (req, res) => {
  *     tags:
  *       - Instagram
  *     summary: Callback do login do Instagram (público)
+ *     description: >
+ *       Endpoint chamado pelo Facebook/Instagram após autorização.
+ *       Recebe code e state e finaliza o login.
+ *     parameters:
+ *       - in: query
+ *         name: code
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Código de autorização retornado pelo Instagram/Facebook.
+ *       - in: query
+ *         name: state
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: State assinado, usado para recuperar returnTo/userId.
+ *       - in: query
+ *         name: redirect
+ *         required: false
+ *         schema:
+ *           type: boolean
+ *           default: true
+ *         description: Se false, retorna JSON em vez de redirecionar.
+ *     responses:
+ *       200:
+ *         description: Resposta em JSON quando redirect=false (pode incluir choose_required, reauth_required)
+ *       302:
+ *         description: Redirecionamento para o frontend (fluxo padrão)
+ *       400:
+ *         description: Parâmetros inválidos (ex.: code ausente)
  */
 instagramRouter.get("/callback", async (req, res) => {
   await controller.callback(req, res);
@@ -82,9 +148,53 @@ instagramRouter.get("/callback", async (req, res) => {
  *   get:
  *     tags:
  *       - Instagram
- *     summary: Retorna se há conta do Instagram conectada para o usuário logado
+ *     summary: Status de conexão do Instagram (por conta ativa ou informada)
+ *     description: >
+ *       Retorna se há Instagram conectado para o usuário.
+ *       Se instagramAccountId/accountId for enviado, avalia aquela conta.
+ *       Caso contrário, usa conta ativa do usuário (fallback: última conectada).
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: instagramAccountId
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: ID da conta do Instagram no banco (multi-conta).
+ *       - in: query
+ *         name: accountId
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: Alias de instagramAccountId.
+ *     responses:
+ *       200:
+ *         description: Status de conexão
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 connected:
+ *                   type: boolean
+ *                 instagramAccountId:
+ *                   type: string
+ *                   nullable: true
+ *                 igUserId:
+ *                   type: string
+ *                   nullable: true
+ *                 username:
+ *                   type: string
+ *                   nullable: true
+ *                 accountType:
+ *                   type: string
+ *                   nullable: true
+ *                 expiresAt:
+ *                   type: string
+ *                   nullable: true
+ *       401:
+ *         description: Não autenticado
  */
 instagramRouter.get("/status", authMiddleware, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
@@ -98,16 +208,34 @@ instagramRouter.get("/status", authMiddleware, async (req, res) => {
  */
 
 /**
- * ✅ Retorna conta ativa atual (activeInstagramAccountId) + dados básicos
- *
  * @openapi
  * /api/instagram/active:
  *   get:
  *     tags:
  *       - Instagram
  *     summary: Retorna a conta Instagram ativa do usuário logado
+ *     description: >
+ *       Retorna activeInstagramAccountId do usuário e os dados da conta ativa (se conectada).
  *     security:
  *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Conta ativa
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok:
+ *                   type: boolean
+ *                 activeInstagramAccountId:
+ *                   type: string
+ *                   nullable: true
+ *                 account:
+ *                   type: object
+ *                   nullable: true
+ *       401:
+ *         description: Não autenticado
  */
 instagramRouter.get("/active", authMiddleware, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
@@ -165,17 +293,37 @@ instagramRouter.get("/active", authMiddleware, async (req, res) => {
 });
 
 /**
- * ✅ Define a conta ativa do usuário
- * Body: { instagramAccountId: string }
- *
  * @openapi
  * /api/instagram/active:
  *   post:
  *     tags:
  *       - Instagram
  *     summary: Define a conta Instagram ativa do usuário logado
+ *     description: >
+ *       Define activeInstagramAccountId do usuário.
+ *       Body: { instagramAccountId }.
  *     security:
  *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - instagramAccountId
+ *             properties:
+ *               instagramAccountId:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Conta ativa definida
+ *       400:
+ *         description: Body inválido
+ *       401:
+ *         description: Não autenticado
+ *       404:
+ *         description: Conta não encontrada/não conectada
  */
 instagramRouter.post("/active", authMiddleware, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
@@ -238,16 +386,22 @@ instagramRouter.post("/active", authMiddleware, async (req, res) => {
 });
 
 /**
- * ✅ Lista TODAS as contas Instagram conectadas do usuário (e marca a ativa)
- *
  * @openapi
  * /api/instagram/accounts:
  *   get:
  *     tags:
  *       - Instagram
  *     summary: Lista todas as contas do Instagram conectadas do usuário logado
+ *     description: >
+ *       Lista as contas conectadas e marca qual é a ativa (activeInstagramAccountId).
+ *       Se não houver ativa e existir ao menos 1 conta conectada, define a primeira como ativa.
  *     security:
  *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Lista de contas conectadas
+ *       401:
+ *         description: Não autenticado
  */
 instagramRouter.get("/accounts", authMiddleware, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
@@ -324,7 +478,29 @@ instagramRouter.get("/accounts", authMiddleware, async (req, res) => {
  */
 
 /**
- * Candidates para o usuário escolher a página/conta IG
+ * @openapi
+ * /api/instagram/candidates:
+ *   get:
+ *     tags:
+ *       - Instagram
+ *     summary: Lista candidates (contas/páginas) para seleção após callback
+ *     description: >
+ *       Retorna candidates associados a um selectionId, para o usuário escolher qual conta/página conectar.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: selectionId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Lista de candidates
+ *       400:
+ *         description: selectionId inválido/ausente
+ *       401:
+ *         description: Não autenticado
  */
 const candidatesHandler = async (req: any, res: any) => {
   res.setHeader("Cache-Control", "no-store");
@@ -342,9 +518,50 @@ instagramRouter.get("/ig-candidates", authMiddleware, candidatesHandler);
  *   post:
  *     tags:
  *       - Instagram
- *     summary: Confirma seleção e persiste a conta/token necessários
+ *     summary: Confirma seleção e persiste conta/token necessários
+ *     description: >
+ *       Confirma selectionId e selections, persiste InstagramAccount(s) e enfileira backfill.
  *     security:
  *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - selectionId
+ *               - selections
+ *             properties:
+ *               selectionId:
+ *                 type: string
+ *               returnTo:
+ *                 type: string
+ *                 example: /settings
+ *               redirect:
+ *                 type: boolean
+ *                 default: false
+ *               selections:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required:
+ *                     - igUserId
+ *                     - facebookPageId
+ *                   properties:
+ *                     igUserId:
+ *                       type: string
+ *                     facebookPageId:
+ *                       type: string
+ *     responses:
+ *       200:
+ *         description: Contas confirmadas e backfill enfileirado
+ *       400:
+ *         description: Payload inválido
+ *       401:
+ *         description: Não autenticado
+ *       500:
+ *         description: Erro interno ao confirmar
  */
 instagramRouter.post("/confirm", authMiddleware, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
@@ -385,9 +602,16 @@ instagramRouter.post("/confirm", authMiddleware, async (req, res) => {
  *   post:
  *     tags:
  *       - Instagram
- *     summary: Desconecta a conta do Instagram do usuário logado
+ *     summary: Desconecta Instagram do usuário
+ *     description: >
+ *       Marca contas como desconectadas e limpa tokens. Também limpa activeInstagramAccountId.
  *     security:
  *       - bearerAuth: []
+ *     responses:
+ *       204:
+ *         description: Desconectado com sucesso
+ *       401:
+ *         description: Não autenticado
  */
 instagramRouter.post("/disconnect", authMiddleware, async (req, res) => {
   await controller.disconnect(req, res);
@@ -408,9 +632,48 @@ instagramRouter.post("/disconnect", authMiddleware, async (req, res) => {
  *   get:
  *     tags:
  *       - Instagram
- *     summary: Retorna métricas do Instagram para o dashboard (do usuário logado)
+ *     summary: Retorna métricas do Instagram para o dashboard
+ *     description: >
+ *       Retorna KPIs, série temporal e topContent.
+ *       Usa multi-conta: se instagramAccountId/accountId não for enviado, usa conta ativa do usuário.
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: from
+ *         required: true
+ *         schema:
+ *           type: string
+ *           example: "2026-01-10"
+ *         description: Data inicial (YYYY-MM-DD)
+ *       - in: query
+ *         name: to
+ *         required: true
+ *         schema:
+ *           type: string
+ *           example: "2026-01-17"
+ *         description: Data final (YYYY-MM-DD)
+ *       - in: query
+ *         name: instagramAccountId
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: ID da conta do Instagram (multi-conta). Se omitido, usa conta ativa.
+ *       - in: query
+ *         name: accountId
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: Alias de instagramAccountId.
+ *     responses:
+ *       200:
+ *         description: Métricas e topContent
+ *       400:
+ *         description: Parâmetros inválidos
+ *       401:
+ *         description: Não autenticado
+ *       409:
+ *         description: Instagram não conectado / token inválido
  */
 instagramRouter.get("/metrics", authMiddleware, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
@@ -423,9 +686,49 @@ instagramRouter.get("/metrics", authMiddleware, async (req, res) => {
  *   get:
  *     tags:
  *       - Instagram Posts
- *     summary: Listar posts importados do Instagram (DB-first)
+ *     summary: Lista posts importados do Instagram (DB-first)
+ *     description: >
+ *       Retorna posts salvos no banco para a conta ativa do usuário (ou filtros de data/tipo).
+ *       Ideal para histórico (backfill).
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: from
+ *         required: false
+ *         schema:
+ *           type: string
+ *           example: "2026-01-01"
+ *         description: Data inicial (YYYY-MM-DD)
+ *       - in: query
+ *         name: to
+ *         required: false
+ *         schema:
+ *           type: string
+ *           example: "2026-01-17"
+ *         description: Data final (YYYY-MM-DD)
+ *       - in: query
+ *         name: type
+ *         required: false
+ *         schema:
+ *           type: string
+ *           example: "REELS"
+ *         description: Tipo de mídia (REELS, IMAGE, VIDEO, CAROUSEL_ALBUM)
+ *       - in: query
+ *         name: limit
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           default: 50
+ *           maximum: 200
+ *         description: Máximo de posts retornados
+ *     responses:
+ *       200:
+ *         description: Lista de posts do banco (filtrados pela conta ativa)
+ *       401:
+ *         description: Não autenticado
+ *       501:
+ *         description: Model InstagramPost não existe no Prisma
  */
 instagramRouter.get("/posts", authMiddleware, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");

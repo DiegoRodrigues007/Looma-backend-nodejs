@@ -17,8 +17,15 @@ import { SetActiveInstagramAccountUseCase } from "../../../application/instagram
 
 // ✅ helpers extraídos (http/instagram)
 import { ymd, parseYmd, listDays } from "../instagram/instagramDateUtils";
-import { toFiniteNumber, mapInsightByDayRobust } from "../instagram/instagramInsightsMapper";
-import { setIgLoginCookie, getIgLoginCookie, clearIgLoginCookie } from "../instagram/instagramCookies";
+import {
+  toFiniteNumber,
+  mapInsightByDayRobust,
+} from "../instagram/instagramInsightsMapper";
+import {
+  setIgLoginCookie,
+  getIgLoginCookie,
+  clearIgLoginCookie,
+} from "../instagram/instagramCookies";
 import { signState, safeParseState } from "../instagram/instagramState";
 import { isInstagramTokenInvalid } from "../instagram/instagramErrors";
 import {
@@ -90,11 +97,13 @@ function getAuthenticatedUserId(req: Request): string | null {
     anyReq?.userId ||
     null;
 
-  if (typeof fromUser === "string" && fromUser.trim().length > 0) return fromUser.trim();
+  if (typeof fromUser === "string" && fromUser.trim().length > 0)
+    return fromUser.trim();
   if (typeof fromUser === "number") return String(fromUser);
 
   const fromHeader = req.header("x-user-id");
-  if (typeof fromHeader === "string" && fromHeader.trim().length > 0) return fromHeader.trim();
+  if (typeof fromHeader === "string" && fromHeader.trim().length > 0)
+    return fromHeader.trim();
 
   return null;
 }
@@ -128,7 +137,10 @@ function safeRedirect(res: Response, status: number, url: string) {
   res.redirect(status, url);
 }
 
-function buildFrontRedirect(opts: { returnTo: string; params: Record<string, string> }) {
+function buildFrontRedirect(opts: {
+  returnTo: string;
+  params: Record<string, string>;
+}) {
   const frontUrl = process.env.FRONTEND_URL ?? "http://localhost:5173";
   const { returnTo, params } = opts;
 
@@ -158,7 +170,8 @@ function normalizeCandidate(c: any): IgCandidate {
     username: String(c?.username ?? "").trim(),
     accountType: String(c?.accountType ?? "").trim(),
     facebookPageId: String(c?.facebookPageId ?? "").trim(),
-    facebookPageName: c?.facebookPageName != null ? String(c.facebookPageName) : undefined,
+    facebookPageName:
+      c?.facebookPageName != null ? String(c.facebookPageName) : undefined,
     pageAccessToken: String(c?.pageAccessToken ?? "").trim(),
     source:
       c?.source === "connected_instagram_account"
@@ -167,13 +180,19 @@ function normalizeCandidate(c: any): IgCandidate {
   };
 }
 
-async function persistCandidatesToDb(opts: { userId: string; selectionId: string; candidates: any[] }) {
+async function persistCandidatesToDb(opts: {
+  userId: string;
+  selectionId: string;
+  candidates: any[];
+}) {
   const { userId, selectionId } = opts;
   const candidates = Array.isArray(opts.candidates) ? opts.candidates : [];
 
   const normalized = candidates
     .map(normalizeCandidate)
-    .filter((c) => !!c.igUserId && !!c.facebookPageId && !!c.pageAccessToken && !!c.username);
+    .filter(
+      (c) => !!c.igUserId && !!c.facebookPageId && !!c.pageAccessToken && !!c.username
+    );
 
   if (!selectionId || !userId || normalized.length === 0) return;
 
@@ -200,7 +219,10 @@ async function persistCandidatesToDb(opts: { userId: string; selectionId: string
   }
 }
 
-async function readCandidatesFromDb(opts: { userId: string; selectionId: string }): Promise<IgCandidate[]> {
+async function readCandidatesFromDb(opts: {
+  userId: string;
+  selectionId: string;
+}): Promise<IgCandidate[]> {
   const { userId, selectionId } = opts;
 
   try {
@@ -277,14 +299,17 @@ async function fetchDailyInteractionsByPosts(opts: {
   let after: string | undefined = undefined;
 
   for (let guard = 0; guard < 30; guard++) {
-    const mediaRes: AxiosResponse<IgMediaResponse> = await graph.get<IgMediaResponse>(`/${igUserId}/media`, {
-      params: {
-        fields: "id,timestamp,like_count,comments_count",
-        limit: 100,
-        after,
-        access_token: accessToken,
-      },
-    });
+    const mediaRes: AxiosResponse<IgMediaResponse> = await graph.get<IgMediaResponse>(
+      `/${igUserId}/media`,
+      {
+        params: {
+          fields: "id,timestamp,like_count,comments_count",
+          limit: 100,
+          after,
+          access_token: accessToken,
+        },
+      }
+    );
 
     const data: IgMediaItem[] = mediaRes.data?.data ?? [];
     allMedia.push(...data);
@@ -327,12 +352,13 @@ async function fetchDailyInteractionsByPosts(opts: {
 
   await asyncPool(6, inRange, async (m) => {
     try {
-      const insightsRes: AxiosResponse<IgInsightsResponse> = await graph.get<IgInsightsResponse>(`/${m.id}/insights`, {
-        params: {
-          metric: "shares,saved",
-          access_token: accessToken,
-        },
-      });
+      const insightsRes: AxiosResponse<IgInsightsResponse> =
+        await graph.get<IgInsightsResponse>(`/${m.id}/insights`, {
+          params: {
+            metric: "shares,saved",
+            access_token: accessToken,
+          },
+        });
 
       const arr = insightsRes.data?.data ?? [];
 
@@ -400,23 +426,35 @@ async function fetchTopContentFromDb(opts: {
     .map((p) => {
       const m = (p as any).metrics?.[0];
 
-      const likes = toFiniteNumber((p as any).likeCount);
-      const comments = toFiniteNumber((p as any).commentsCount);
+      // ✅ no seu model parece ser likeCount/commentsCount (camelCase)
+      const likes = toFiniteNumber((p as any).likeCount ?? (p as any).likes ?? 0);
+      const comments = toFiniteNumber((p as any).commentsCount ?? (p as any).comments ?? 0);
 
       const reach = toFiniteNumber(m?.reach);
       const shares = toFiniteNumber(m?.shares);
       const saved = toFiniteNumber(m?.saves);
-      const totalInteractions = toFiniteNumber(m?.totalInteractions) || likes + comments + shares + saved;
+
+      const totalInteractions =
+        toFiniteNumber(m?.totalInteractions) || likes + comments + shares + saved;
 
       const plays = toFiniteNumber(m?.plays);
       const videoViews = toFiniteNumber(m?.videoViews);
       const views = plays || videoViews || null;
 
+      const permalink = String((p as any).permalink ?? "");
+
+      // ✅ thumb: tenta thumbnailUrl -> mediaUrl -> null
+      const thumb =
+        (p as any).thumbnailUrl ??
+        (p as any).thumb ??
+        (p as any).mediaUrl ??
+        null;
+
       return {
         id: String((p as any).igMediaId),
-        permalink: String((p as any).permalink ?? ""),
+        permalink,
         caption: (p as any).caption ?? null,
-        thumb: (p as any).thumb ?? null,
+        thumb,
         mediaType: String((p as any).mediaType ?? "IMAGE"),
         publishedAt: (p as any).publishedAt.toISOString(),
         engagementRate: ((likes + comments) / denom) * 100,
@@ -433,7 +471,10 @@ async function fetchTopContentFromDb(opts: {
         },
       };
     })
-    .sort((a, b) => (b.insights?.totalInteractions ?? 0) - (a.insights?.totalInteractions ?? 0))
+    .sort(
+      (a, b) =>
+        (b.insights?.totalInteractions ?? 0) - (a.insights?.totalInteractions ?? 0)
+    )
     .slice(0, 6);
 
   return items;
@@ -452,14 +493,17 @@ async function fetchTopContent(opts: {
   const fromTs = parseYmd(from).getTime();
   const toTs = parseYmd(to).getTime() + 86399999;
 
-  const mediaRes: AxiosResponse<IgMediaResponse> = await graph.get<IgMediaResponse>(`/${igUserId}/media`, {
-    params: {
-      fields:
-        "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count",
-      limit: 50,
-      access_token: accessToken,
-    },
-  });
+  const mediaRes: AxiosResponse<IgMediaResponse> = await graph.get<IgMediaResponse>(
+    `/${igUserId}/media`,
+    {
+      params: {
+        fields:
+          "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count",
+        limit: 50,
+        access_token: accessToken,
+      },
+    }
+  );
 
   const data = mediaRes.data?.data ?? [];
   const denom = Math.max(1, toFiniteNumber(followersBase));
@@ -506,17 +550,19 @@ async function fetchTopContent(opts: {
   const enriched = await Promise.all(
     items.map(async (it) => {
       try {
-        const insightsRes: AxiosResponse<IgInsightsResponse> = await graph.get<IgInsightsResponse>(`/${it.id}/insights`, {
-          params: {
-            metric: "plays,video_views,reach,total_interactions,shares,saved",
-            access_token: accessToken,
-          },
-        });
+        const insightsRes: AxiosResponse<IgInsightsResponse> =
+          await graph.get<IgInsightsResponse>(`/${it.id}/insights`, {
+            params: {
+              metric: "plays,video_views,reach,total_interactions,shares,saved",
+              access_token: accessToken,
+            },
+          });
 
         const arr = insightsRes.data?.data ?? [];
 
         const pickValue = (row: IgInsightRow): number | null => {
-          const v = row?.values?.[0]?.value ?? row?.total_value ?? row?.value ?? row ?? null;
+          const v =
+            row?.values?.[0]?.value ?? row?.total_value ?? row?.value ?? row ?? null;
           const n = toFiniteNumber(v);
           return Number.isFinite(n) ? n : null;
         };
@@ -555,7 +601,10 @@ async function fetchTopContent(opts: {
    Backfill enqueue (multi-conta)
 ========================= */
 
-async function enqueueInstagramBackfill(opts: { userId: string; instagramAccountId: string }) {
+async function enqueueInstagramBackfill(opts: {
+  userId: string;
+  instagramAccountId: string;
+}) {
   const { userId, instagramAccountId } = opts;
 
   const existing = await prisma.instagramBackfillJob.findFirst({
@@ -589,7 +638,9 @@ function getInstagramAccountIdFromQuery(req: Request): string | null {
   return s.length > 0 ? s : null;
 }
 
-async function getActiveInstagramAccountIdFromUser(userId: string): Promise<string | null> {
+async function getActiveInstagramAccountIdFromUser(
+  userId: string
+): Promise<string | null> {
   try {
     const u = await prisma.user.findUnique({
       where: { id: userId },
@@ -602,7 +653,10 @@ async function getActiveInstagramAccountIdFromUser(userId: string): Promise<stri
   }
 }
 
-async function getInstagramAccountForRequest(userId: string, instagramAccountId?: string | null) {
+async function getInstagramAccountForRequest(
+  userId: string,
+  instagramAccountId?: string | null
+) {
   if (instagramAccountId) {
     return prisma.instagramAccount.findFirst({
       where: { id: instagramAccountId, userId },
@@ -729,7 +783,9 @@ export class InstagramAuthController {
           missingPermissions: missing,
         });
 
-        const urlFromUseCase = (result as any)?.loginUrl ? String((result as any).loginUrl) : "";
+        const urlFromUseCase = (result as any)?.loginUrl
+          ? String((result as any).loginUrl)
+          : "";
         const rerequestUrl = urlFromUseCase || this.authService.buildLoginUrl(state, true);
 
         clearIgLoginCookie(res);
@@ -752,7 +808,9 @@ export class InstagramAuthController {
         clearIgLoginCookie(res);
 
         const selectionId = String((result as any).selectionId);
-        const candidates = Array.isArray((result as any).candidates) ? (result as any).candidates : [];
+        const candidates = Array.isArray((result as any).candidates)
+          ? (result as any).candidates
+          : [];
 
         reminderLogSafe("[IG] choose_required", {
           userId,
@@ -787,7 +845,9 @@ export class InstagramAuthController {
       clearIgLoginCookie(res);
 
       if (!redirect) {
-        safeJson(res, 500, { message: "Resposta inesperada no callback do Instagram" });
+        safeJson(res, 500, {
+          message: "Resposta inesperada no callback do Instagram",
+        });
         return;
       }
 
@@ -803,7 +863,8 @@ export class InstagramAuthController {
 
       clearIgLoginCookie(res);
 
-      const details = err?.response?.data ?? (err?.message ? String(err.message) : String(err));
+      const details =
+        err?.response?.data ?? (err?.message ? String(err.message) : String(err));
       const msg = "Erro ao completar login do Instagram";
 
       if (!redirect) {
@@ -921,10 +982,12 @@ export class InstagramAuthController {
         if (acc?.id) connectedAccountIds.push(acc.id);
       }
 
+      // ✅ enqueue backfill para todas as contas conectadas
       for (const id of connectedAccountIds) {
         await enqueueInstagramBackfill({ userId, instagramAccountId: id });
       }
 
+      // ✅ se só conectou uma, seta como ativa
       if (connectedAccountIds.length === 1) {
         try {
           await this.setActiveAccount.execute({
@@ -974,7 +1037,6 @@ export class InstagramAuthController {
     }
 
     try {
-      // ✅ UseCase recebe STRING
       const result = await this.listAccounts.execute(userId);
       safeJson(res, 200, result);
       return;
@@ -1016,7 +1078,9 @@ export class InstagramAuthController {
       return;
     }
 
-    const instagramAccountId = String((req.body as any)?.instagramAccountId ?? "").trim();
+    const instagramAccountId = String(
+      (req.body as any)?.instagramAccountId ?? ""
+    ).trim();
     if (!instagramAccountId) {
       safeJson(res, 400, { message: "instagramAccountId é obrigatório" });
       return;
@@ -1044,7 +1108,8 @@ export class InstagramAuthController {
     const instagramAccountId = getInstagramAccountIdFromQuery(req);
     const row = await getInstagramAccountForRequest(userId, instagramAccountId);
 
-    const connected = !!row?.isConnected && (!!(row as any)?.pageAccessToken || !!(row as any)?.accessToken);
+    const connected =
+      !!row?.isConnected && (!!(row as any)?.pageAccessToken || !!(row as any)?.accessToken);
 
     reminderLogSafe("[IG] status", {
       userId,
@@ -1111,7 +1176,9 @@ export class InstagramAuthController {
     const to = String(req.query.to ?? "");
 
     if (!from || !to) {
-      safeJson(res, 400, { message: "from e to são obrigatórios no formato YYYY-MM-DD" });
+      safeJson(res, 400, {
+        message: "from e to são obrigatórios no formato YYYY-MM-DD",
+      });
       return;
     }
 
@@ -1125,7 +1192,8 @@ export class InstagramAuthController {
 
     const igUserId = String(row.igUserId);
     const accessToken = row.pageAccessToken ?? row.accessToken!;
-    const graphBaseUrl = process.env.INSTAGRAM_GRAPH_BASE_URL ?? "https://graph.facebook.com/v21.0";
+    const graphBaseUrl =
+      process.env.INSTAGRAM_GRAPH_BASE_URL ?? "https://graph.facebook.com/v21.0";
 
     const since = Math.floor(parseYmd(from).getTime() / 1000);
     const until = Math.floor((parseYmd(to).getTime() + 86399999) / 1000);
@@ -1143,7 +1211,7 @@ export class InstagramAuthController {
       const currentFollowers = toFiniteNumber(profileRes.data?.followers_count);
       const username = String(profileRes.data?.username ?? row.username ?? "");
 
-      // ✅ FIX: followersDaily agora é por instagramAccountId (multi-conta)
+      // ✅ followersDaily por instagramAccountId (multi-conta)
       await saveTodayFollowersSnapshot({
         userId,
         instagramAccountId: row.id,
@@ -1177,9 +1245,14 @@ export class InstagramAuthController {
       const profileViewsData = profileViewsRes.data?.data ?? [];
 
       const reachByDay = mapInsightByDayRobust(reachData, "reach", days, 0);
-      const profileViewsByDay = mapInsightByDayRobust(profileViewsData, "profile_views", days, 0);
+      const profileViewsByDay = mapInsightByDayRobust(
+        profileViewsData,
+        "profile_views",
+        days,
+        0
+      );
 
-      // ✅ FIX: buscar histórico por instagramAccountId (multi-conta)
+      // ✅ histórico por instagramAccountId
       const followersRaw = await getFollowersSeriesFromDb({
         userId,
         instagramAccountId: row.id,
@@ -1225,10 +1298,14 @@ export class InstagramAuthController {
       });
 
       const totalReach = timeseries.reduce((acc, t) => acc + (t.reach ?? 0), 0);
-      const totalInteractions = timeseries.reduce((acc, t) => acc + (t.totalInteractions ?? 0), 0);
+      const totalInteractions = timeseries.reduce(
+        (acc, t) => acc + (t.totalInteractions ?? 0),
+        0
+      );
       const avgEngagementRate =
         timeseries.length > 0
-          ? timeseries.reduce((acc, t) => acc + (t.engagementRate ?? 0), 0) / timeseries.length
+          ? timeseries.reduce((acc, t) => acc + (t.engagementRate ?? 0), 0) /
+            timeseries.length
           : 0;
 
       const followersKpi = timeseries[timeseries.length - 1]?.followers ?? currentFollowers;
@@ -1294,7 +1371,9 @@ export class InstagramAuthController {
           },
         });
 
-        safeJson(res, 409, { message: "Token inválido/expirado. Reconecte o Instagram." });
+        safeJson(res, 409, {
+          message: "Token inválido/expirado. Reconecte o Instagram.",
+        });
         return;
       }
 
