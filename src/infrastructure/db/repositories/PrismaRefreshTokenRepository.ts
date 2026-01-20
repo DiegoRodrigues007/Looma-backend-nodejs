@@ -1,4 +1,4 @@
-import { prisma } from "./prismaClient"; 
+import { prisma } from "../prismaClient"; 
 
 export class PrismaRefreshTokenRepository {
   async create(userId: string, tokenHash: string, expiresAt: Date) {

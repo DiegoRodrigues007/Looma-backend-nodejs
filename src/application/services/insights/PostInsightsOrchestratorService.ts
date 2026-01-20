@@ -4,7 +4,7 @@ import { PostInsightRulesService } from "./PostInsightRulesService";
 import { PostInsightAiNarratorService } from "./PostInsightAiNarratorService";
 import type { Narrated } from "./PostInsightAiNarratorService";
 
-import { prisma } from "../../infrastructure/db/prismaClient";
+import { prisma } from "../../../infrastructure/db/prismaClient";
 
 /**
  * ✅ Objetivo do Orchestrator (tooltip):

@@ -1,7 +1,7 @@
 // src/application/instagram/InstagramBackfillService.ts
 import axios from "axios";
 import { prisma } from "../../infrastructure/db/prismaClient";
-import { InstagramPostInsightsService } from "../../infrastructure/instagram/InstagramPostInsightsService";
+import { InstagramPostInsightsService } from "../../infrastructure/instagram/services/InstagramPostInsightsService";
 
 /**
  * Backfill do Instagram:

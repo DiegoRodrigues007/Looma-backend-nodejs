@@ -1,6 +1,6 @@
 // src/application/insights/PostInsightAiNarratorService.ts
-import { OllamaClient } from "../../infrastructure/ai/OllamaClient";
-import { env } from "../../infrastructure/config/env";
+import { OllamaClient } from "../../../infrastructure/ai/OllamaClient";
+import { env } from "../../../infrastructure/config/env";
 import type {
   PostInsightResult,
   ProvenItem,

@@ -1,7 +1,7 @@
 import axios from "axios";
 import type { AxiosResponse } from "axios";
-import { parseYmd, ymd } from "../../presentation/http/instagram/instagramDateUtils";
-import { toFiniteNumber } from "../../presentation/http/instagram/instagramInsightsMapper";
+import { parseYmd, ymd } from "../../shared/date/instagramDateUtils";
+import { toFiniteNumber } from "./mappers/instagramInsightsMapper";
 
 type IgMediaItem = {
   id: string;

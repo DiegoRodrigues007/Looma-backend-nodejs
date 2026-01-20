@@ -1,5 +1,5 @@
 // src/application/instagram/SetActiveInstagramAccountUseCase.ts
-import { prisma } from "../../infrastructure/db/prismaClient";
+import { prisma } from "../../../infrastructure/db/prismaClient";
 
 export type SetActiveInstagramAccountInput = {
   userId: string;

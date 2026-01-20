@@ -1,8 +1,8 @@
 import { Request, Response } from "express";
 import crypto from "crypto";
 import axios from "axios";
-import { IYouTubeAuthService } from "../../../application/youtube/IYouTubeAuthService";
-import { CompleteYouTubeLoginUseCase } from "../../../application/youtube/CompleteYouTubeLoginUseCase";
+import { IYouTubeAuthService } from "../../../application/ports/youtube/IYouTubeAuthService";
+import { CompleteYouTubeLoginUseCase } from "../../../application/use-cases/youtube/CompleteYouTubeLoginUseCase";
 import { PrismaYouTubeTokenStore } from "../../../infrastructure/db/PrismaYouTubeTokenStore";
 
 function getAuthenticatedUserId(req: Request): string | null {

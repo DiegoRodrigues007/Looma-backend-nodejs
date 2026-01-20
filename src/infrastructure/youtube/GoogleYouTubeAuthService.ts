@@ -5,7 +5,7 @@ import type {
   YouTubeChannelInfo,
   YouTubeTokenPayload,
   YouTubeTopContentItem,
-} from "../../application/youtube/IYouTubeAuthService";
+} from "../../application/ports/youtube/IYouTubeAuthService";
 
 function required(name: string, value?: string) {
   if (!value || !value.trim()) throw new Error(`Env ${name} é obrigatório`);

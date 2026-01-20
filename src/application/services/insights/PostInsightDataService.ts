@@ -2,7 +2,7 @@
 import {
   InstagramPostInsightsService,
   IgMediaWithInsights,
-} from "../../infrastructure/instagram/InstagramPostInsightsService";
+} from "../../../infrastructure/instagram/services/InstagramPostInsightsService";
 
 export type BaselineStats = {
   overall: {

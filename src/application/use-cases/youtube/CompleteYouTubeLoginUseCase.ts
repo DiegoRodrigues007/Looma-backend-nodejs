@@ -1,5 +1,5 @@
-import { IYouTubeAuthService } from "./IYouTubeAuthService";
-import { IYouTubeTokenStore } from "./IYouTubeTokenStore";
+import { IYouTubeAuthService } from "../../ports/youtube/IYouTubeAuthService";
+import { IYouTubeTokenStore } from "../../youtube/IYouTubeTokenStore";
 
 export class CompleteYouTubeLoginUseCase {
   constructor(

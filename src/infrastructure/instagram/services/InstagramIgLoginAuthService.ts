@@ -2,8 +2,8 @@ import {
   IInstagramIgLoginAuthService,
   InstagramAuthReauthRequired,
   InstagramAuthResolved,
-} from "../../application/instagram/IInstagramIgLoginAuthService";
-import { InstagramIgLoginClient } from "./InstagramIgLoginClient";
+} from "../../../application/ports/instagram/IInstagramIgLoginAuthService";
+import { InstagramIgLoginClient } from "../clients/InstagramIgLoginClient";
 
 export class InstagramIgLoginAuthService implements IInstagramIgLoginAuthService {
   constructor(private readonly client: InstagramIgLoginClient) {}

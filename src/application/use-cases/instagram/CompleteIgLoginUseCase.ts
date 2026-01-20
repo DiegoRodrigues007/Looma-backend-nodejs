@@ -3,8 +3,8 @@ import {
   IInstagramIgLoginAuthService,
   InstagramAuthReauthRequired,
   InstagramAuthResolved,
-} from "./IInstagramIgLoginAuthService";
-import { IInstagramTokenStore } from "./IInstagramTokenStore";
+} from "../../ports/instagram/IInstagramIgLoginAuthService";
+import { IInstagramTokenStore } from "../../instagram/IInstagramTokenStore";
 
 /* =========================
    DTOs

@@ -1,9 +1,9 @@
-import { prisma } from "./prismaClient";
+import { prisma } from "../prismaClient";
 import {
   MetricsSnapshot,
   MetricsPlatform,
-} from "../../domain/entities/MetricsSnapshot";
-import { IMetricsSnapshotRepository } from "../../domain/repositories/IMetricsSnapshotRepository";
+} from "../../../domain/entities/MetricsSnapshot";
+import { IMetricsSnapshotRepository } from "../../../domain/repositories/IMetricsSnapshotRepository";
 
 export class PrismaMetricsSnapshotRepository
   implements IMetricsSnapshotRepository

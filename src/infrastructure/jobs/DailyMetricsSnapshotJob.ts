@@ -1,7 +1,7 @@
 import cron from "node-cron";
-import { PrismaMetricsSnapshotRepository } from "../db/PrismaMetricsSnapshotRepository";
-import { MetricsHistoryService } from "../../application/services/MetricsHistoryService";
-import { InstagramMetricsService } from "../instagram/InstagramMetricsService";
+import { PrismaMetricsSnapshotRepository } from "../db/repositories/PrismaMetricsSnapshotRepository";
+import { MetricsHistoryService } from "../../application/services/metrics/MetricsHistoryService";
+import { InstagramMetricsService } from "../instagram/services/InstagramMetricsService";
 import { prisma } from "../db/prismaClient";
 
 export function startDailyMetricsSnapshotJob() {

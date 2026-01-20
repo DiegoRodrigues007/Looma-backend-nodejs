@@ -1,9 +1,9 @@
 import {
   WeeklyInsightsResponseDTO,
   WeeklyInsightDTO,
-} from "../dto/metrics/WeeklyInsightsDTO";
-import { IMetricsSnapshotRepository } from "../../domain/repositories/IMetricsSnapshotRepository";
-import { MetricsPlatform } from "../../domain/entities/MetricsSnapshot";
+} from "../../dto/metrics/WeeklyInsightsDTO";
+import { IMetricsSnapshotRepository } from "../../../domain/repositories/IMetricsSnapshotRepository";
+import { MetricsPlatform } from "../../../domain/entities/MetricsSnapshot";
 
 function ymd(d: Date) {
   return d.toISOString().slice(0, 10);

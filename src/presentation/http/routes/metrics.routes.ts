@@ -2,8 +2,8 @@ import { Router } from "express";
 import { MetricsController } from "../controllers/MetricsController";
 
 // ✅ Insights
-import { PrismaMetricsSnapshotRepository } from "../../../infrastructure/db/PrismaMetricsSnapshotRepository";
-import { WeeklyInsightsService } from "../../../application/services/WeeklyInsightsService";
+import { PrismaMetricsSnapshotRepository } from "../../../infrastructure/db/repositories/PrismaMetricsSnapshotRepository";
+import { WeeklyInsightsService } from "../../../application/services/insights/WeeklyInsightsService";
 import { InsightsController } from "../controllers/InsightsController";
 
 const router = Router();

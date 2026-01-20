@@ -1,5 +1,5 @@
-import { prisma } from "../../../infrastructure/db/prismaClient";
-import { ymd } from "./instagramDateUtils";
+import { prisma } from "../prismaClient";
+import { ymd } from "../../../shared/date/instagramDateUtils";
 
 function dateOnlyUtcFromYmd(ymdStr: string) {
   const s = String(ymdStr ?? "").slice(0, 10);

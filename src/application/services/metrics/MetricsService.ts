@@ -1,6 +1,6 @@
-import { compareKpi } from "./KpiComparator";
-import { compareEngagement } from "./EngagementComparator";
-import { KpiComparativeDTO } from "../dto/metrics/KpiComparativeDTO";
+import { compareKpi } from "../KpiComparator";
+import { compareEngagement } from "../EngagementComparator";
+import { KpiComparativeDTO } from "../../dto/metrics/KpiComparativeDTO";
 
 
 export interface MetricsSnapshot {

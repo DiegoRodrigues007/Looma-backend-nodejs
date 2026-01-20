@@ -1,18 +1,18 @@
 import { prisma } from "../../infrastructure/db/prismaClient";
 
-import { InstagramIgLoginClient } from "../../infrastructure/instagram/InstagramIgLoginClient";
-import { InstagramIgLoginAuthService } from "../../infrastructure/instagram/InstagramIgLoginAuthService";
+import { InstagramIgLoginClient } from "../../infrastructure/instagram/clients/InstagramIgLoginClient";
+import { InstagramIgLoginAuthService } from "../../infrastructure/instagram/services/InstagramIgLoginAuthService";
 import { PrismaInstagramTokenStore } from "../../infrastructure/db/PrismaInstagramTokenStore";
-import { CompleteIgLoginUseCase } from "../../application/instagram/CompleteIgLoginUseCase";
+import { CompleteIgLoginUseCase } from "../../application/use-cases/instagram/CompleteIgLoginUseCase";
 import { InstagramAuthController } from "../http/controllers/InstagramAuthController";
 
-import { ListInstagramAccountsUseCase } from "../../application/instagram/ListInstagramAccountsUseCase";
-import { SetActiveInstagramAccountUseCase } from "../../application/instagram/SetActiveInstagramAccountUseCase";
+import { ListInstagramAccountsUseCase } from "../../application/use-cases/instagram/ListInstagramAccountsUseCase";
+import { SetActiveInstagramAccountUseCase } from "../../application/use-cases/instagram/SetActiveInstagramAccountUseCase";
 
 import {
   GetInstagramDashboardMetricsUseCase,
   type BackfillDaysFn,
-} from "../../application/instagram/GetInstagramDashboardMetricsUseCase";
+} from "../../application/use-cases/instagram/GetInstagramDashboardMetricsUseCase";
 
 export function makeInstagramAuthController(): InstagramAuthController {
   const client = new InstagramIgLoginClient();

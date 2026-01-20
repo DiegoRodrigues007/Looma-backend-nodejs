@@ -2,10 +2,10 @@ import { Request, Response } from "express";
 import {
   WeeklyInsightsService,
   TopContentForInsights,
-} from "../../../application/services/WeeklyInsightsService";
+} from "../../../application/services/insights/WeeklyInsightsService";
 import { prisma } from "../../../infrastructure/db/prismaClient";
-import { InstagramTopContentService } from "../../../infrastructure/instagram/InstagramTopContentService";
-import { PostInsightsOrchestratorService } from "../../../application/services/PostInsightsOrchestratorService";
+import { InstagramTopContentService } from "../../../infrastructure/instagram/services/InstagramTopContentService";
+import { PostInsightsOrchestratorService } from "../../../application/services/insights/PostInsightsOrchestratorService";
 
 function getUserIdFromReq(req: Request): string | null {
   const anyReq = req as any;

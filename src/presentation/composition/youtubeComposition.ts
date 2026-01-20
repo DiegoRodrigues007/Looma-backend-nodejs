@@ -1,6 +1,6 @@
 import { GoogleYouTubeAuthService } from "../../infrastructure/youtube/GoogleYouTubeAuthService";
 import { PrismaYouTubeTokenStore } from "../../infrastructure/db/PrismaYouTubeTokenStore";
-import { CompleteYouTubeLoginUseCase } from "../../application/youtube/CompleteYouTubeLoginUseCase";
+import { CompleteYouTubeLoginUseCase } from "../../application/use-cases/youtube/CompleteYouTubeLoginUseCase";
 import { YouTubeAuthController } from "../http/controllers/YouTubeAuthController";
 
 export function makeYouTubeAuthController(): YouTubeAuthController {

@@ -1,5 +1,5 @@
 // src/application/instagram/ListInstagramAccountsUseCase.ts
-import { prisma } from "../../infrastructure/db/prismaClient";
+import { prisma } from "../../../infrastructure/db/prismaClient";
 
 export type InstagramAccountListItem = {
   id: string;

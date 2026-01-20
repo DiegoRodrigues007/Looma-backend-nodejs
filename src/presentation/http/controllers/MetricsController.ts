@@ -1,9 +1,9 @@
 import { Request, Response } from "express";
-import { MetricsService } from "../../../application/services/MetricsService";
-import { PrismaMetricsSnapshotRepository } from "../../../infrastructure/db/PrismaMetricsSnapshotRepository";
+import { MetricsService } from "../../../application/services/metrics/MetricsService";
+import { PrismaMetricsSnapshotRepository } from "../../../infrastructure/db/repositories/PrismaMetricsSnapshotRepository";
 import { MetricsPlatform, MetricsSnapshot } from "../../../domain/entities/MetricsSnapshot";
 import { prisma } from "../../../infrastructure/db/prismaClient";
-import { InstagramMetricsService } from "../../../infrastructure/instagram/InstagramMetricsService";
+import { InstagramMetricsService } from "../../../infrastructure/instagram/services/InstagramMetricsService";
 
 export class MetricsController {
   // =====================================================

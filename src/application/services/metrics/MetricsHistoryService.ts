@@ -1,5 +1,5 @@
-import { IMetricsSnapshotRepository } from "../../domain/repositories/IMetricsSnapshotRepository";
-import { MetricsSnapshot, MetricsPlatform } from "../../domain/entities/MetricsSnapshot";
+import { IMetricsSnapshotRepository } from "../../../domain/repositories/IMetricsSnapshotRepository";
+import { MetricsSnapshot, MetricsPlatform } from "../../../domain/entities/MetricsSnapshot";
 
 type SnapshotInput = Omit<MetricsSnapshot, "userId" | "platform" | "date">;
 

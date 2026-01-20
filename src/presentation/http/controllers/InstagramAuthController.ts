@@ -2,19 +2,19 @@ import { Request, Response } from "express";
 import crypto from "crypto";
 import axios from "axios";
 import { prisma } from "../../../infrastructure/db/prismaClient";
-import { IInstagramIgLoginAuthService } from "../../../application/instagram/IInstagramIgLoginAuthService";
-import { CompleteIgLoginUseCase } from "../../../application/instagram/CompleteIgLoginUseCase";
-import { ListInstagramAccountsUseCase } from "../../../application/instagram/ListInstagramAccountsUseCase";
-import { SetActiveInstagramAccountUseCase } from "../../../application/instagram/SetActiveInstagramAccountUseCase";
-import { ymd, listDays } from "../instagram/instagramDateUtils";
-import { toFiniteNumber } from "../instagram/instagramInsightsMapper";
+import { IInstagramIgLoginAuthService } from "../../../application/ports/instagram/IInstagramIgLoginAuthService";
+import { CompleteIgLoginUseCase } from "../../../application/use-cases/instagram/CompleteIgLoginUseCase";
+import { ListInstagramAccountsUseCase } from "../../../application/use-cases/instagram/ListInstagramAccountsUseCase";
+import { SetActiveInstagramAccountUseCase } from "../../../application/use-cases/instagram/SetActiveInstagramAccountUseCase";
+import { ymd, listDays } from "../../../shared/date/instagramDateUtils";
+import { toFiniteNumber } from "../../../infrastructure/instagram/mappers/instagramInsightsMapper";
 import {
   setIgLoginCookie,
   getIgLoginCookie,
   clearIgLoginCookie,
 } from "../instagram/instagramCookies";
 import { signState, safeParseState } from "../instagram/instagramState";
-import { GetInstagramDashboardMetricsUseCase } from "../../../application/instagram/GetInstagramDashboardMetricsUseCase";
+import { GetInstagramDashboardMetricsUseCase } from "../../../application/use-cases/instagram/GetInstagramDashboardMetricsUseCase";
 import {
   buildWindowsSummary,
   type InstagramTimeseriesPoint,
