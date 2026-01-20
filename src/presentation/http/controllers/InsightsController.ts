@@ -1,21 +1,12 @@
-// src/presentation/http/controllers/InsightsController.ts
-
 import { Request, Response } from "express";
-
 import {
   WeeklyInsightsService,
   TopContentForInsights,
 } from "../../../application/services/WeeklyInsightsService";
-
 import { prisma } from "../../../infrastructure/db/prismaClient";
 import { InstagramTopContentService } from "../../../infrastructure/instagram/InstagramTopContentService";
-
-// ✅ Tooltip orchestrator
 import { PostInsightsOrchestratorService } from "../../../application/services/PostInsightsOrchestratorService";
 
-/* =========================
-   Helpers
-========================= */
 function getUserIdFromReq(req: Request): string | null {
   const anyReq = req as any;
 
@@ -23,7 +14,7 @@ function getUserIdFromReq(req: Request): string | null {
     anyReq.userId ||
     anyReq.user?.id ||
     anyReq.user?.userId ||
-    anyReq.user?.sub || // ✅ IMPORTANTÍSSIMO (seu middleware usa sub)
+    anyReq.user?.sub || 
     anyReq.auth?.userId ||
     anyReq.session?.userId ||
     null
@@ -56,10 +47,6 @@ type IgCreds = {
   accessToken: string;
 };
 
-/**
- * Tenta extrair campos padrão do orchestrator de forma robusta,
- * sem “quebrar” caso o formato mude.
- */
 function pickInsightPayload(data: any) {
   const verdict =
     data?.verdict ?? data?.result?.verdict ?? data?.rules?.verdict ?? null;
@@ -83,7 +70,6 @@ function pickInsightPayload(data: any) {
   return { verdict, score, evidence, why, improve, continueDoing };
 }
 
-/** Normaliza score para Float? do Prisma */
 function normalizeScore(score: any): number | null {
   if (score === null || score === undefined) return null;
   if (typeof score === "number") return Number.isFinite(score) ? score : null;
@@ -91,10 +77,6 @@ function normalizeScore(score: any): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/**
- * Prisma: evidence/why/improve/continue são Json obrigatórios.
- * Então aqui garantimos que nunca será null/undefined.
- */
 function ensureJson(value: any, fallback: any) {
   if (value === null || value === undefined) return fallback;
   return value;
@@ -103,16 +85,10 @@ function ensureJson(value: any, fallback: any) {
 export class InsightsController {
   private readonly topContentService = new InstagramTopContentService();
 
-  // ✅ tooltip
   private readonly postInsightsService = new PostInsightsOrchestratorService();
 
   constructor(private readonly weeklyInsightsService: WeeklyInsightsService) {}
 
-  /**
-   * ✅ Busca credenciais do IG corretamente pela tabela instagramAccount
-   * - suporta multi-conta via query param instagramAccountId
-   * - usa pageAccessToken se existir (normalmente é o que dá mais certo)
-   */
   private async getConnectedInstagramCreds(
     userId: string,
     instagramAccountId?: string | null
@@ -125,7 +101,7 @@ export class InsightsController {
       },
       orderBy: { updatedAt: "desc" },
       select: {
-        igUserId: true, // ✅ CORRETO (no seu schema é igUserId)
+        igUserId: true, 
         accessToken: true,
         pageAccessToken: true,
       },

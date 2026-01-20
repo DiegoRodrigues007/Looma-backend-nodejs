@@ -41,9 +41,62 @@ function isTokenLikelyInvalid(reason: string) {
   );
 }
 
-/* =========================
-   IG Fetch helpers
-========================= */
+function extractGraphErrorMessage(e: any): string {
+  return String(
+    e?.response?.data?.error?.message ||
+      e?.response?.data?.message ||
+      e?.message ||
+      "unknown_error"
+  );
+}
+
+/**
+ * Busca uma métrica "day" do endpoint /{igUserId}/insights
+ * e retorna o valor do dia (primeiro item em values).
+ *
+ * IMPORTANTE:
+ * - Se der erro, lança (não retorna 0).
+ * - Isso evita mascarar permissão/token errado.
+ */
+async function fetchIgInsightDayMetric(opts: {
+  graph: ReturnType<typeof axios.create>;
+  igUserId: string;
+  accessToken: string;
+  metric: "reach" | "profile_views";
+  since: number;
+  until: number;
+}): Promise<number> {
+  const { graph, igUserId, accessToken, metric, since, until } = opts;
+
+  try {
+    const res = await graph.get(`/${igUserId}/insights`, {
+      params: {
+        metric,
+        period: "day",
+        since,
+        until,
+        access_token: accessToken,
+      },
+    });
+
+    const rows = Array.isArray(res.data?.data) ? res.data.data : [];
+    const row = rows.find((x: any) => x?.name === metric);
+
+    // Para period=day geralmente vem: values: [{ value, end_time }]
+    const value =
+      row?.values?.[0]?.value ??
+      row?.total_value?.value ??
+      row?.total_value ??
+      row?.value ??
+      0;
+
+    return toFiniteNumber(value);
+  } catch (e: any) {
+    const reason = extractGraphErrorMessage(e);
+    // 🔥 NÃO mascarar erro -> propaga
+    throw new Error(`[IG][INSIGHTS:${metric}] ${reason}`);
+  }
+}
 
 async function fetchReachForDay(opts: {
   graph: ReturnType<typeof axios.create>;
@@ -52,26 +105,7 @@ async function fetchReachForDay(opts: {
   since: number;
   until: number;
 }) {
-  const { graph, igUserId, accessToken, since, until } = opts;
-
-  try {
-    const res = await graph.get(`/${igUserId}/insights`, {
-      params: {
-        metric: "reach",
-        metric_type: "time_series",
-        period: "day",
-        since,
-        until,
-        access_token: accessToken,
-      },
-    });
-
-    const row = (res.data?.data ?? []).find((x: any) => x?.name === "reach");
-    const v = row?.values?.[0]?.value ?? row?.value ?? row?.total_value ?? 0;
-    return toFiniteNumber(v);
-  } catch {
-    return 0;
-  }
+  return fetchIgInsightDayMetric({ ...opts, metric: "reach" });
 }
 
 async function fetchProfileViewsTotalForDay(opts: {
@@ -81,28 +115,7 @@ async function fetchProfileViewsTotalForDay(opts: {
   since: number;
   until: number;
 }) {
-  const { graph, igUserId, accessToken, since, until } = opts;
-
-  try {
-    const pvRes = await graph.get(`/${igUserId}/insights`, {
-      params: {
-        metric: "profile_views",
-        metric_type: "total_value",
-        period: "day",
-        since,
-        until,
-        access_token: accessToken,
-      },
-    });
-
-    const row = (pvRes.data?.data ?? []).find(
-      (x: any) => x?.name === "profile_views"
-    );
-
-    return toFiniteNumber(row?.total_value ?? row?.value ?? 0);
-  } catch {
-    return 0;
-  }
+  return fetchIgInsightDayMetric({ ...opts, metric: "profile_views" });
 }
 
 /* =========================
@@ -132,8 +145,10 @@ export async function runInstagramDailySnapshotsJob(opts?: {
   const targetYmd = (opts?.ymd ?? ymdUtc(new Date())).slice(0, 10);
   const day = dayDateUtc(targetYmd);
 
+  // ✅ desde 00:00 UTC
   const since = Math.floor(day.getTime() / 1000);
-  const until = Math.floor((day.getTime() + 86399999) / 1000);
+  // ✅ até 24h depois (padrão mais seguro no Graph)
+  const until = since + 86400;
 
   const limit = Math.max(1, Math.min(500, Number(opts?.limit ?? 200)));
 
@@ -152,6 +167,8 @@ export async function runInstagramDailySnapshotsJob(opts?: {
       igUserId: true,
       pageAccessToken: true,
       accessToken: true,
+      // se você tiver accountType salvo, pode incluir aqui pra debug:
+      // accountType: true,
     },
   });
 
@@ -171,13 +188,13 @@ export async function runInstagramDailySnapshotsJob(opts?: {
     }
 
     try {
-      // followers
+      // 1) followers (Graph /{igUserId}?fields=followers_count)
       const profileRes = await graph.get(`/${igUserId}`, {
         params: { fields: "followers_count", access_token: accessToken },
       });
       const followers = toFiniteNumber(profileRes.data?.followers_count);
 
-      // profile views
+      // 2) profile views (Insights day)
       const profileViewsTotal = await fetchProfileViewsTotalForDay({
         graph,
         igUserId,
@@ -186,7 +203,7 @@ export async function runInstagramDailySnapshotsJob(opts?: {
         until,
       });
 
-      // reach
+      // 3) reach (Insights day)
       const reach = await fetchReachForDay({
         graph,
         igUserId,
@@ -195,7 +212,7 @@ export async function runInstagramDailySnapshotsJob(opts?: {
         until,
       });
 
-      // ✅ total interactions REAL (posts)
+      // 4) interactions por posts (REAL)
       const interactions = await fetchDailyInteractionsByPosts({
         igUserId,
         accessToken,
@@ -204,9 +221,9 @@ export async function runInstagramDailySnapshotsJob(opts?: {
         graph,
       });
 
-      const totalInteractions =
-        interactions.totalByDay[targetYmd] ?? 0;
+      const totalInteractions = toFiniteNumber(interactions?.totalByDay?.[targetYmd] ?? 0);
 
+      // 5) upsert no snapshot diário
       await prisma.instagramAccountDailyMetrics.upsert({
         where: { instagramAccountId_day: { instagramAccountId, day } },
         update: {
@@ -228,15 +245,10 @@ export async function runInstagramDailySnapshotsJob(opts?: {
 
       ok++;
     } catch (e: any) {
-      const reason =
-        e?.response?.data?.error?.message ||
-        e?.response?.data?.message ||
-        e?.message ||
-        "unknown_error";
-
-      const reasonStr = String(reason);
+      const reasonStr = extractGraphErrorMessage(e);
       failures.push({ instagramAccountId, reason: reasonStr });
 
+      // Se parece token inválido, desmarca conexão
       if (isTokenLikelyInvalid(reasonStr)) {
         try {
           await prisma.instagramAccount.update({
@@ -250,7 +262,9 @@ export async function runInstagramDailySnapshotsJob(opts?: {
               facebookPageId: null,
             },
           });
-        } catch {}
+        } catch {
+          // ignora
+        }
       }
     }
   }

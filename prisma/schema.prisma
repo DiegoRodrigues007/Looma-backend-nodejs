@@ -34,7 +34,6 @@ model User {
   instagramPosts        InstagramPost[]
   instagramBackfillJobs InstagramBackfillJob[]
 
-  // ✅ snapshot diario consolidado (por conta)
   dailyInstagramMetrics InstagramAccountDailyMetrics[]
 
   @@map("User")
@@ -72,7 +71,6 @@ model InstagramCandidate {
   facebookPageId   String
   facebookPageName String?
 
-  // ✅ obrigatório no seu fluxo (confirmSelection depende disso)
   pageAccessToken String
   source          String
 
@@ -82,9 +80,6 @@ model InstagramCandidate {
   createdAt  DateTime  @default(now())
   selectedAt DateTime?
 
-  // ✅ FIX PRINCIPAL:
-  // permite vários candidates para o mesmo selectionId
-  // e evita duplicar o mesmo candidate na mesma seleção
   @@unique([userId, selectionId, igUserId, facebookPageId], name: "userId_selectionId_igUserId_facebookPageId")
   @@index([userId, createdAt])
   @@index([userId, selectionId, createdAt])

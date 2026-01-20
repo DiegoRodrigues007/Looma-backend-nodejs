@@ -1,13 +1,18 @@
-// src/presentation/composition/instagramComposition.ts
+import { prisma } from "../../infrastructure/db/prismaClient";
+
 import { InstagramIgLoginClient } from "../../infrastructure/instagram/InstagramIgLoginClient";
 import { InstagramIgLoginAuthService } from "../../infrastructure/instagram/InstagramIgLoginAuthService";
 import { PrismaInstagramTokenStore } from "../../infrastructure/db/PrismaInstagramTokenStore";
 import { CompleteIgLoginUseCase } from "../../application/instagram/CompleteIgLoginUseCase";
 import { InstagramAuthController } from "../http/controllers/InstagramAuthController";
 
-// ✅ NOVO: use cases multi-conta (conta ativa)
 import { ListInstagramAccountsUseCase } from "../../application/instagram/ListInstagramAccountsUseCase";
 import { SetActiveInstagramAccountUseCase } from "../../application/instagram/SetActiveInstagramAccountUseCase";
+
+import {
+  GetInstagramDashboardMetricsUseCase,
+  type BackfillDaysFn,
+} from "../../application/instagram/GetInstagramDashboardMetricsUseCase";
 
 export function makeInstagramAuthController(): InstagramAuthController {
   const client = new InstagramIgLoginClient();
@@ -16,15 +21,25 @@ export function makeInstagramAuthController(): InstagramAuthController {
   const tokenStore = new PrismaInstagramTokenStore();
   const completeLogin = new CompleteIgLoginUseCase(authService, tokenStore);
 
-  // ✅ novos use cases (usam Prisma direto internamente)
   const listAccounts = new ListInstagramAccountsUseCase();
   const setActiveAccount = new SetActiveInstagramAccountUseCase();
 
-  // ✅ controller agora recebe também os 2 use cases
+  const backfillDays: BackfillDaysFn = async () => {
+    throw new Error(
+      "backfillDays não foi injetado. O controller deve fornecer a função (ou mover para um service)."
+    );
+  };
+
+  const dashboardMetrics = new GetInstagramDashboardMetricsUseCase(
+    prisma,
+    backfillDays
+  );
+
   return new InstagramAuthController(
     authService,
     completeLogin,
     listAccounts,
-    setActiveAccount
+    setActiveAccount,
+    dashboardMetrics
   );
 }
