@@ -1,14 +1,15 @@
 import cron from "node-cron";
-import { PrismaMetricsSnapshotRepository } from "../../infrastructure/db/PrismaMetricsSnapshotRepository";
-import { MetricsHistoryService } from "../services/MetricsHistoryService";
-import { InstagramMetricsService } from "../../infrastructure/instagram/InstagramMetricsService";
-import { prisma } from "../../infrastructure/db/prismaClient";
+import { PrismaMetricsSnapshotRepository } from "../db/PrismaMetricsSnapshotRepository";
+import { MetricsHistoryService } from "../../application/services/MetricsHistoryService";
+import { InstagramMetricsService } from "../instagram/InstagramMetricsService";
+import { prisma } from "../db/prismaClient";
 
 export function startDailyMetricsSnapshotJob() {
   cron.schedule(
+    // ✅ todo dia às 00:05
     "5 0 * * *",
     async () => {
-      console.log("📊 Running daily Instagram metrics snapshot (backup)");
+      console.log("📊 [SNAPSHOT] Running daily Instagram metrics snapshot");
 
       const repo = new PrismaMetricsSnapshotRepository();
       const historyService = new MetricsHistoryService(repo);
@@ -17,9 +18,9 @@ export function startDailyMetricsSnapshotJob() {
         where: { isConnected: true },
         select: {
           userId: true,
-          igUserId: true, // ✅ CORRETO (no seu schema é igUserId)
+          igUserId: true,
           accessToken: true,
-          pageAccessToken: true, // ✅ se existir no seu model, ajuda (prioriza)
+          pageAccessToken: true,
         },
       });
 
@@ -32,10 +33,8 @@ export function startDailyMetricsSnapshotJob() {
         processed++;
 
         const igUserId = account.igUserId ? String(account.igUserId) : null;
-
-        // ✅ prioriza pageAccessToken (melhor pros endpoints IG), senão accessToken
         const accessToken =
-          (account as any).pageAccessToken ?? account.accessToken ?? null;
+          account.pageAccessToken ?? account.accessToken ?? null;
 
         if (!igUserId || !accessToken) {
           skipped++;
@@ -43,12 +42,13 @@ export function startDailyMetricsSnapshotJob() {
         }
 
         try {
+          // 🔹 busca métricas do dia
           const metrics = await InstagramMetricsService.fetchDailyMetrics(
             igUserId,
             accessToken
           );
 
-          // ✅ híbrido: só salva se ainda não existir snapshot do dia
+          // 🔹 garante apenas 1 snapshot por dia
           const didSave = await historyService.ensureDailySnapshot(
             account.userId,
             "instagram",
@@ -67,7 +67,7 @@ export function startDailyMetricsSnapshotJob() {
       }
 
       console.log(
-        `✅ Daily snapshot done. processed=${processed} saved=${saved} skipped=${skipped} failed=${failed}`
+        `✅ [SNAPSHOT] Done. processed=${processed} saved=${saved} skipped=${skipped} failed=${failed}`
       );
     },
     {

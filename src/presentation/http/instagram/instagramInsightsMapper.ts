@@ -38,26 +38,29 @@ export function mapInsightByDayRobust(
   fallbackValue = 0
 ): Record<string, number> {
   const out: Record<string, number> = {};
-  for (const d of days) out[d] = 0;
+  for (const d of days) out[d] = fallbackValue;
 
   const item = insightsData?.find((x: any) => x?.name === metricName);
   if (!item) return out;
 
   const values = item?.values;
+
   if (Array.isArray(values) && values.length > 0) {
     for (const v of values) {
       const endTime: string | undefined = v?.end_time;
       if (!endTime) continue;
 
       const day = endTime.slice(0, 10);
-      out[day] = toFiniteNumber(v?.value);
+      if (day in out) out[day] = toFiniteNumber(v?.value);
     }
     return out;
   }
 
   const total = toFiniteNumber(item?.total_value ?? item?.value ?? fallbackValue);
-  const lastDay = days[days.length - 1];
-  out[lastDay] = total;
+
+  if (days.length === 1) {
+    out[days[0]] = total;
+  }
 
   return out;
 }

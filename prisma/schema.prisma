@@ -22,8 +22,7 @@ model User {
   updatedAt    DateTime @updatedAt
 
   activeInstagramAccountId String?
-
-  activeInstagramAccount InstagramAccount? @relation("UserActiveInstagramAccount", fields: [activeInstagramAccountId], references: [id], onDelete: SetNull)
+  activeInstagramAccount   InstagramAccount? @relation("UserActiveInstagramAccount", fields: [activeInstagramAccountId], references: [id], onDelete: SetNull)
 
   instagramAccounts   InstagramAccount[]
   youtubeAccounts     YouTubeAccount[]
@@ -35,7 +34,8 @@ model User {
   instagramPosts        InstagramPost[]
   instagramBackfillJobs InstagramBackfillJob[]
 
-  instagramFollowersDaily InstagramFollowersDaily[]
+  // ✅ snapshot diario consolidado (por conta)
+  dailyInstagramMetrics InstagramAccountDailyMetrics[]
 
   @@map("User")
 }
@@ -72,6 +72,7 @@ model InstagramCandidate {
   facebookPageId   String
   facebookPageName String?
 
+  // ✅ obrigatório no seu fluxo (confirmSelection depende disso)
   pageAccessToken String
   source          String
 
@@ -81,7 +82,10 @@ model InstagramCandidate {
   createdAt  DateTime  @default(now())
   selectedAt DateTime?
 
-  @@unique([userId, selectionId], name: "userId_selectionId")
+  // ✅ FIX PRINCIPAL:
+  // permite vários candidates para o mesmo selectionId
+  // e evita duplicar o mesmo candidate na mesma seleção
+  @@unique([userId, selectionId, igUserId, facebookPageId], name: "userId_selectionId_igUserId_facebookPageId")
   @@index([userId, createdAt])
   @@index([userId, selectionId, createdAt])
   @@map("InstagramCandidates")
@@ -112,10 +116,11 @@ model InstagramAccount {
 
   activeForUsers User[] @relation("UserActiveInstagramAccount")
 
-  posts          InstagramPost[]           @relation("InstagramAccountToPosts")
-  backfillJobs   InstagramBackfillJob[]
-  candidates     InstagramCandidate[]      @relation("CandidateToConnectedAccount")
-  followersDaily InstagramFollowersDaily[] @relation("InstagramAccountToFollowersDaily")
+  posts        InstagramPost[]        @relation("InstagramAccountToPosts")
+  backfillJobs InstagramBackfillJob[]
+  candidates   InstagramCandidate[]   @relation("CandidateToConnectedAccount")
+
+  dailyMetrics InstagramAccountDailyMetrics[] @relation("InstagramAccountToDailyMetrics")
 
   @@unique([userId, igUserId], name: "userId_igUserId")
   @@index([userId])
@@ -136,8 +141,7 @@ model YouTubeAccount {
   grantedScopes String?
 
   lastRefreshedAt DateTime?
-
-  isConnected Boolean @default(false)
+  isConnected     Boolean   @default(false)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -171,25 +175,28 @@ model MetricsSnapshot {
   @@map("MetricsSnapshots")
 }
 
-model InstagramFollowersDaily {
+model InstagramAccountDailyMetrics {
   id String @id @default(uuid())
 
   userId             String
   instagramAccountId String
 
-  day       DateTime @db.Date
-  followers Int      @default(0)
+  day DateTime @db.Date
+
+  followers         Int @default(0)
+  profileViewsTotal Int @default(0)
+  reach             Int @default(0)
+  totalInteractions Int @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  instagramAccount InstagramAccount @relation("InstagramAccountToFollowersDaily", fields: [instagramAccountId], references: [id], onDelete: Cascade)
+  user             User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  instagramAccount InstagramAccount @relation("InstagramAccountToDailyMetrics", fields: [instagramAccountId], references: [id], onDelete: Cascade)
 
   @@unique([instagramAccountId, day], name: "instagramAccountId_day")
   @@index([userId, instagramAccountId, day])
-  @@map("InstagramFollowersDaily")
+  @@map("InstagramAccountDailyMetrics")
 }
 
 model InstagramPost {
@@ -213,8 +220,7 @@ model InstagramPost {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
+  user             User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   instagramAccount InstagramAccount @relation("InstagramAccountToPosts", fields: [instagramAccountId], references: [id], onDelete: Cascade)
 
   metrics InstagramPostMetric[]
@@ -275,8 +281,7 @@ model InstagramPostInsightResult {
 model InstagramBackfillJob {
   id String @id @default(uuid())
 
-  userId String
-
+  userId             String
   instagramAccountId String
 
   status String  @default("queued")
@@ -292,8 +297,7 @@ model InstagramBackfillJob {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
+  user             User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   instagramAccount InstagramAccount @relation(fields: [instagramAccountId], references: [id], onDelete: Cascade)
 
   @@index([userId, status, createdAt])

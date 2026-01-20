@@ -1,6 +1,6 @@
 // src/application/jobs/InstagramBackfillWorker.ts
-import { prisma } from "../../infrastructure/db/prismaClient";
-import { InstagramBackfillService } from "../instagram/InstagramBackfillService";
+import { prisma } from "../db/prismaClient";
+import { InstagramBackfillService } from "../../application/instagram/InstagramBackfillService";
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));

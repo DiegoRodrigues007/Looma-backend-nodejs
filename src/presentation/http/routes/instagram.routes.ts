@@ -7,7 +7,9 @@ import { authMiddleware } from "../middlewares/authMiddleware";
 import { prisma } from "../../../infrastructure/db/prismaClient";
 
 export const instagramRouter = Router();
-const controller = makeInstagramAuthController();
+
+// ✅ IMPORTANT: evita erro TS "Property X does not exist on type InstagramAuthController"
+const controller: any = makeInstagramAuthController();
 
 /**
  * Helper: transforma querystring "true"/"false" em boolean real.
@@ -52,51 +54,37 @@ function getUserIdFromReq(req: any): string | null {
  *   get:
  *     tags:
  *       - Instagram
- *     summary: Inicia o login do Instagram
- *     description: >
- *       Inicia o fluxo OAuth do Instagram.
- *       Se redirect=false, retorna um JSON com a URL de login. Caso contrário, redireciona (302).
+ *     summary: Inicia o fluxo de autenticação do Instagram (OAuth).
+ *     description: Gera a URL de login e (opcionalmente) redireciona para o provedor.
  *     security:
  *       - bearerAuth: []
  *     parameters:
  *       - in: query
  *         name: redirect
- *         required: false
  *         schema:
  *           type: boolean
- *           default: true
- *         description: >
- *           Se false, retorna { url, state } em JSON ao invés de redirecionar.
- *       - in: query
- *         name: state
  *         required: false
- *         schema:
- *           type: string
- *           example: /settings
- *         description: >
- *           Caminho do frontend para retornar após o login (ex: /settings).
+ *         description: Se true, o backend pode responder com redirect (depende do controller).
  *     responses:
  *       200:
- *         description: Retorna a URL de login em JSON (quando redirect=false)
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 url:
- *                   type: string
- *                 state:
- *                   type: string
- *       302:
- *         description: Redireciona para a URL de login do Instagram
+ *         description: Fluxo iniciado.
  *       401:
- *         description: Não autenticado
+ *         description: Não autenticado.
+ *       501:
+ *         description: Controller.start não implementado.
  */
 instagramRouter.get("/start", authMiddleware, async (req, res) => {
   const redirect = parseBool(req.query.redirect);
   if (redirect !== undefined) {
     (req.query as any).redirect = redirect;
   }
+
+  if (typeof controller.start !== "function") {
+    return res
+      .status(501)
+      .json({ ok: false, message: "Controller.start não implementado" });
+  }
+
   await controller.start(req, res);
 });
 
@@ -106,39 +94,23 @@ instagramRouter.get("/start", authMiddleware, async (req, res) => {
  *   get:
  *     tags:
  *       - Instagram
- *     summary: Callback do login do Instagram (público)
- *     description: >
- *       Endpoint chamado pelo Facebook/Instagram após autorização.
- *       Recebe code e state e finaliza o login.
- *     parameters:
- *       - in: query
- *         name: code
- *         required: true
- *         schema:
- *           type: string
- *         description: Código de autorização retornado pelo Instagram/Facebook.
- *       - in: query
- *         name: state
- *         required: false
- *         schema:
- *           type: string
- *         description: State assinado, usado para recuperar returnTo/userId.
- *       - in: query
- *         name: redirect
- *         required: false
- *         schema:
- *           type: boolean
- *           default: true
- *         description: Se false, retorna JSON em vez de redirecionar.
+ *     summary: Callback do OAuth do Instagram.
+ *     description: Endpoint chamado pelo provedor após o usuário autorizar.
  *     responses:
  *       200:
- *         description: Resposta em JSON quando redirect=false (pode incluir choose_required, reauth_required)
- *       302:
- *         description: Redirecionamento para o frontend (fluxo padrão)
+ *         description: Callback processado.
  *       400:
- *         description: Parâmetros inválidos (ex.: code ausente)
+ *         description: Dados inválidos ou ausência de parâmetros necessários.
+ *       501:
+ *         description: Controller.callback não implementado.
  */
 instagramRouter.get("/callback", async (req, res) => {
+  if (typeof controller.callback !== "function") {
+    return res
+      .status(501)
+      .json({ ok: false, message: "Controller.callback não implementado" });
+  }
+
   await controller.callback(req, res);
 });
 
@@ -148,56 +120,26 @@ instagramRouter.get("/callback", async (req, res) => {
  *   get:
  *     tags:
  *       - Instagram
- *     summary: Status de conexão do Instagram (por conta ativa ou informada)
- *     description: >
- *       Retorna se há Instagram conectado para o usuário.
- *       Se instagramAccountId/accountId for enviado, avalia aquela conta.
- *       Caso contrário, usa conta ativa do usuário (fallback: última conectada).
+ *     summary: Status da conexão do Instagram para o usuário autenticado.
  *     security:
  *       - bearerAuth: []
- *     parameters:
- *       - in: query
- *         name: instagramAccountId
- *         required: false
- *         schema:
- *           type: string
- *         description: ID da conta do Instagram no banco (multi-conta).
- *       - in: query
- *         name: accountId
- *         required: false
- *         schema:
- *           type: string
- *         description: Alias de instagramAccountId.
  *     responses:
  *       200:
- *         description: Status de conexão
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 connected:
- *                   type: boolean
- *                 instagramAccountId:
- *                   type: string
- *                   nullable: true
- *                 igUserId:
- *                   type: string
- *                   nullable: true
- *                 username:
- *                   type: string
- *                   nullable: true
- *                 accountType:
- *                   type: string
- *                   nullable: true
- *                 expiresAt:
- *                   type: string
- *                   nullable: true
+ *         description: Retorna status/estado atual do vínculo.
  *       401:
- *         description: Não autenticado
+ *         description: Não autenticado.
+ *       501:
+ *         description: Controller.status não implementado.
  */
 instagramRouter.get("/status", authMiddleware, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
+
+  if (typeof controller.status !== "function") {
+    return res
+      .status(501)
+      .json({ ok: false, message: "Controller.status não implementado" });
+  }
+
   await controller.status(req, res);
 });
 
@@ -213,35 +155,21 @@ instagramRouter.get("/status", authMiddleware, async (req, res) => {
  *   get:
  *     tags:
  *       - Instagram
- *     summary: Retorna a conta Instagram ativa do usuário logado
- *     description: >
- *       Retorna activeInstagramAccountId do usuário e os dados da conta ativa (se conectada).
+ *     summary: Obtém a conta Instagram ativa do usuário.
  *     security:
  *       - bearerAuth: []
  *     responses:
  *       200:
- *         description: Conta ativa
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 ok:
- *                   type: boolean
- *                 activeInstagramAccountId:
- *                   type: string
- *                   nullable: true
- *                 account:
- *                   type: object
- *                   nullable: true
+ *         description: Conta ativa (ou null se não houver).
  *       401:
- *         description: Não autenticado
+ *         description: Não autenticado.
  */
 instagramRouter.get("/active", authMiddleware, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
 
   const userId = getUserIdFromReq(req);
-  if (!userId) return res.status(401).json({ ok: false, message: "Não autenticado" });
+  if (!userId)
+    return res.status(401).json({ ok: false, message: "Não autenticado" });
 
   const user = await prisma.user.findUnique({
     where: { id: String(userId) },
@@ -298,10 +226,7 @@ instagramRouter.get("/active", authMiddleware, async (req, res) => {
  *   post:
  *     tags:
  *       - Instagram
- *     summary: Define a conta Instagram ativa do usuário logado
- *     description: >
- *       Define activeInstagramAccountId do usuário.
- *       Body: { instagramAccountId }.
+ *     summary: Define a conta Instagram ativa do usuário.
  *     security:
  *       - bearerAuth: []
  *     requestBody:
@@ -315,30 +240,34 @@ instagramRouter.get("/active", authMiddleware, async (req, res) => {
  *             properties:
  *               instagramAccountId:
  *                 type: string
+ *                 description: ID da InstagramAccount no banco.
  *     responses:
  *       200:
- *         description: Conta ativa definida
+ *         description: Conta ativa definida com sucesso.
  *       400:
- *         description: Body inválido
+ *         description: instagramAccountId ausente.
  *       401:
- *         description: Não autenticado
+ *         description: Não autenticado.
  *       404:
- *         description: Conta não encontrada/não conectada
+ *         description: Conta não encontrada ou não conectada para este usuário.
  */
 instagramRouter.post("/active", authMiddleware, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
 
   const userId = getUserIdFromReq(req);
-  if (!userId) return res.status(401).json({ ok: false, message: "Não autenticado" });
+  if (!userId)
+    return res.status(401).json({ ok: false, message: "Não autenticado" });
 
   const instagramAccountId = String(req.body?.instagramAccountId ?? "").trim();
   if (!instagramAccountId) {
-    return res.status(400).json({ ok: false, message: "instagramAccountId é obrigatório" });
+    return res
+      .status(400)
+      .json({ ok: false, message: "instagramAccountId é obrigatório" });
   }
 
   // ✅ se existir controller.setActive, usa ele (regra centralizada)
-  if (typeof (controller as any).setActive === "function") {
-    return (controller as any).setActive(req, res);
+  if (typeof controller.setActive === "function") {
+    return controller.setActive(req, res);
   }
 
   // fallback
@@ -362,7 +291,8 @@ instagramRouter.post("/active", authMiddleware, async (req, res) => {
   if (!exists) {
     return res.status(404).json({
       ok: false,
-      message: "Conta Instagram não encontrada para este usuário (ou não está conectada).",
+      message:
+        "Conta Instagram não encontrada para este usuário (ou não está conectada).",
     });
   }
 
@@ -391,24 +321,21 @@ instagramRouter.post("/active", authMiddleware, async (req, res) => {
  *   get:
  *     tags:
  *       - Instagram
- *     summary: Lista todas as contas do Instagram conectadas do usuário logado
- *     description: >
- *       Lista as contas conectadas e marca qual é a ativa (activeInstagramAccountId).
- *       Se não houver ativa e existir ao menos 1 conta conectada, define a primeira como ativa.
+ *     summary: Lista contas Instagram conectadas do usuário (multi-conta).
  *     security:
  *       - bearerAuth: []
  *     responses:
  *       200:
- *         description: Lista de contas conectadas
+ *         description: Lista de contas conectadas e conta ativa.
  *       401:
- *         description: Não autenticado
+ *         description: Não autenticado.
  */
 instagramRouter.get("/accounts", authMiddleware, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
 
   // ✅ prioridade: controller.accounts (usecase)
-  if (typeof (controller as any).accounts === "function") {
-    return (controller as any).accounts(req, res);
+  if (typeof controller.accounts === "function") {
+    return controller.accounts(req, res);
   }
 
   const userId = getUserIdFromReq(req);
@@ -483,34 +410,31 @@ instagramRouter.get("/accounts", authMiddleware, async (req, res) => {
  *   get:
  *     tags:
  *       - Instagram
- *     summary: Lista candidates (contas/páginas) para seleção após callback
- *     description: >
- *       Retorna candidates associados a um selectionId, para o usuário escolher qual conta/página conectar.
+ *     summary: Lista candidatos de contas Instagram para o usuário escolher.
+ *     description: Pode incluir contas Business/Creator encontradas via Graph API.
  *     security:
  *       - bearerAuth: []
- *     parameters:
- *       - in: query
- *         name: selectionId
- *         required: true
- *         schema:
- *           type: string
  *     responses:
  *       200:
- *         description: Lista de candidates
- *       400:
- *         description: selectionId inválido/ausente
+ *         description: Lista de candidatos.
  *       401:
- *         description: Não autenticado
+ *         description: Não autenticado.
+ *       501:
+ *         description: Controller.candidates não implementado.
  */
 const candidatesHandler = async (req: any, res: any) => {
   res.setHeader("Cache-Control", "no-store");
+
+  if (typeof controller.candidates !== "function") {
+    return res
+      .status(501)
+      .json({ ok: false, message: "Controller.candidates não implementado" });
+  }
+
   await controller.candidates(req, res);
 };
 
 instagramRouter.get("/candidates", authMiddleware, candidatesHandler);
-instagramRouter.get("/pages", authMiddleware, candidatesHandler);
-instagramRouter.get("/accounts/candidates", authMiddleware, candidatesHandler);
-instagramRouter.get("/ig-candidates", authMiddleware, candidatesHandler);
 
 /**
  * @openapi
@@ -518,9 +442,7 @@ instagramRouter.get("/ig-candidates", authMiddleware, candidatesHandler);
  *   post:
  *     tags:
  *       - Instagram
- *     summary: Confirma seleção e persiste conta/token necessários
- *     description: >
- *       Confirma selectionId e selections, persiste InstagramAccount(s) e enfileira backfill.
+ *     summary: Confirma o vínculo de uma conta/candidato e finaliza a conexão.
  *     security:
  *       - bearerAuth: []
  *     requestBody:
@@ -529,42 +451,26 @@ instagramRouter.get("/ig-candidates", authMiddleware, candidatesHandler);
  *         application/json:
  *           schema:
  *             type: object
- *             required:
- *               - selectionId
- *               - selections
- *             properties:
- *               selectionId:
- *                 type: string
- *               returnTo:
- *                 type: string
- *                 example: /settings
- *               redirect:
- *                 type: boolean
- *                 default: false
- *               selections:
- *                 type: array
- *                 items:
- *                   type: object
- *                   required:
- *                     - igUserId
- *                     - facebookPageId
- *                   properties:
- *                     igUserId:
- *                       type: string
- *                     facebookPageId:
- *                       type: string
+ *             description: Payload depende do seu controller/usecase (ex.: candidateId, igUserId, pageId, etc).
  *     responses:
  *       200:
- *         description: Contas confirmadas e backfill enfileirado
+ *         description: Conta confirmada/conectada.
  *       400:
- *         description: Payload inválido
+ *         description: Payload inválido.
  *       401:
- *         description: Não autenticado
- *       500:
- *         description: Erro interno ao confirmar
+ *         description: Não autenticado.
+ *       501:
+ *         description: Controller.confirm não implementado.
  */
 instagramRouter.post("/confirm", authMiddleware, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
+
+  if (typeof controller.confirm !== "function") {
+    return res
+      .status(501)
+      .json({ ok: false, message: "Controller.confirm não implementado" });
+  }
+
   await controller.confirm(req, res);
 
   // ✅ extra: se confirmou e não definiu ativa, define a última conectada
@@ -602,22 +508,35 @@ instagramRouter.post("/confirm", authMiddleware, async (req, res) => {
  *   post:
  *     tags:
  *       - Instagram
- *     summary: Desconecta Instagram do usuário
- *     description: >
- *       Marca contas como desconectadas e limpa tokens. Também limpa activeInstagramAccountId.
+ *     summary: Desconecta a conta Instagram (e/ou revoga tokens) do usuário.
  *     security:
  *       - bearerAuth: []
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             description: Payload opcional depende do controller (ex.: instagramAccountId).
  *     responses:
  *       204:
- *         description: Desconectado com sucesso
+ *         description: Desconectado com sucesso (sem conteúdo).
  *       401:
- *         description: Não autenticado
+ *         description: Não autenticado.
+ *       501:
+ *         description: Controller.disconnect não implementado.
  */
 instagramRouter.post("/disconnect", authMiddleware, async (req, res) => {
-  await controller.disconnect(req, res);
-  if (!res.headersSent) {
-    return res.status(204).send();
+  res.setHeader("Cache-Control", "no-store");
+
+  if (typeof controller.disconnect !== "function") {
+    return res
+      .status(501)
+      .json({ ok: false, message: "Controller.disconnect não implementado" });
   }
+
+  await controller.disconnect(req, res);
+  if (!res.headersSent) return res.status(204).send();
 });
 
 /**
@@ -632,103 +551,95 @@ instagramRouter.post("/disconnect", authMiddleware, async (req, res) => {
  *   get:
  *     tags:
  *       - Instagram
- *     summary: Retorna métricas do Instagram para o dashboard
- *     description: >
- *       Retorna KPIs, série temporal e topContent.
- *       Usa multi-conta: se instagramAccountId/accountId não for enviado, usa conta ativa do usuário.
+ *     summary: Retorna métricas do dashboard do Instagram.
  *     security:
  *       - bearerAuth: []
  *     parameters:
  *       - in: query
  *         name: from
- *         required: true
  *         schema:
  *           type: string
- *           example: "2026-01-10"
- *         description: Data inicial (YYYY-MM-DD)
+ *           example: "2026-01-01"
+ *         required: false
+ *         description: Data inicial (YYYY-MM-DD).
  *       - in: query
  *         name: to
- *         required: true
  *         schema:
  *           type: string
- *           example: "2026-01-17"
- *         description: Data final (YYYY-MM-DD)
- *       - in: query
- *         name: instagramAccountId
+ *           example: "2026-01-19"
  *         required: false
- *         schema:
- *           type: string
- *         description: ID da conta do Instagram (multi-conta). Se omitido, usa conta ativa.
- *       - in: query
- *         name: accountId
- *         required: false
- *         schema:
- *           type: string
- *         description: Alias de instagramAccountId.
+ *         description: Data final (YYYY-MM-DD).
  *     responses:
  *       200:
- *         description: Métricas e topContent
- *       400:
- *         description: Parâmetros inválidos
+ *         description: Métricas retornadas com sucesso.
  *       401:
- *         description: Não autenticado
- *       409:
- *         description: Instagram não conectado / token inválido
+ *         description: Não autenticado.
+ *       501:
+ *         description: Controller.metrics não implementado.
  */
 instagramRouter.get("/metrics", authMiddleware, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
+
+  if (typeof controller.metrics !== "function") {
+    return res
+      .status(501)
+      .json({ ok: false, message: "Controller.metrics não implementado" });
+  }
+
   await controller.metrics(req, res);
 });
+
+/**
+ * POSTS (DB-first)
+ */
 
 /**
  * @openapi
  * /api/instagram/posts:
  *   get:
  *     tags:
- *       - Instagram Posts
- *     summary: Lista posts importados do Instagram (DB-first)
- *     description: >
- *       Retorna posts salvos no banco para a conta ativa do usuário (ou filtros de data/tipo).
- *       Ideal para histórico (backfill).
+ *       - Instagram
+ *     summary: Lista posts do Instagram (DB-first), filtrando pela conta ativa.
  *     security:
  *       - bearerAuth: []
  *     parameters:
  *       - in: query
  *         name: from
- *         required: false
  *         schema:
  *           type: string
  *           example: "2026-01-01"
- *         description: Data inicial (YYYY-MM-DD)
+ *         required: false
+ *         description: Data inicial (YYYY-MM-DD) baseada em publishedAt.
  *       - in: query
  *         name: to
- *         required: false
  *         schema:
  *           type: string
- *           example: "2026-01-17"
- *         description: Data final (YYYY-MM-DD)
+ *           example: "2026-01-19"
+ *         required: false
+ *         description: Data final (YYYY-MM-DD) baseada em publishedAt.
  *       - in: query
  *         name: type
- *         required: false
  *         schema:
  *           type: string
- *           example: "REELS"
- *         description: Tipo de mídia (REELS, IMAGE, VIDEO, CAROUSEL_ALBUM)
+ *           example: "IMAGE"
+ *         required: false
+ *         description: Filtra por mediaType (ex.: IMAGE, VIDEO, CAROUSEL).
  *       - in: query
  *         name: limit
- *         required: false
  *         schema:
  *           type: integer
- *           default: 50
+ *           minimum: 1
  *           maximum: 200
- *         description: Máximo de posts retornados
+ *           example: 50
+ *         required: false
+ *         description: Limite de resultados (default 50, max 200).
  *     responses:
  *       200:
- *         description: Lista de posts do banco (filtrados pela conta ativa)
+ *         description: Lista de posts retornada com sucesso.
  *       401:
- *         description: Não autenticado
+ *         description: Não autenticado.
  *       501:
- *         description: Model InstagramPost não existe no Prisma
+ *         description: Model InstagramPost ainda não existe no Prisma.
  */
 instagramRouter.get("/posts", authMiddleware, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
@@ -757,8 +668,11 @@ instagramRouter.get("/posts", authMiddleware, async (req, res) => {
   const from = typeof req.query.from === "string" ? req.query.from.trim() : "";
   const to = typeof req.query.to === "string" ? req.query.to.trim() : "";
   const type = typeof req.query.type === "string" ? req.query.type.trim() : "";
-  const limitRaw = typeof req.query.limit === "string" ? Number(req.query.limit) : undefined;
-  const limit = Number.isFinite(limitRaw) ? Math.min(200, Math.max(1, limitRaw!)) : 50;
+  const limitRaw =
+    typeof req.query.limit === "string" ? Number(req.query.limit) : undefined;
+  const limit = Number.isFinite(limitRaw)
+    ? Math.min(200, Math.max(1, limitRaw!))
+    : 50;
 
   const where: any = { userId: String(userId) };
 

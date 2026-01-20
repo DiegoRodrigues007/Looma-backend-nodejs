@@ -3,7 +3,7 @@ import {
   InstagramAuthReauthRequired,
   InstagramAuthResolved,
 } from "../../application/instagram/IInstagramIgLoginAuthService";
-import { InstagramIgLoginClient, IgCandidate } from "./InstagramIgLoginClient";
+import { InstagramIgLoginClient } from "./InstagramIgLoginClient";
 
 export class InstagramIgLoginAuthService implements IInstagramIgLoginAuthService {
   constructor(private readonly client: InstagramIgLoginClient) {}
@@ -16,7 +16,6 @@ export class InstagramIgLoginAuthService implements IInstagramIgLoginAuthService
   buildLoginUrl(state: string, forceReRequest = false): string {
     return this.client.buildLoginUrl(state, forceReRequest);
   }
-
 
   async exchangeCodeForShortToken(code: string) {
     return this.client.exchangeCodeForShortToken(code);
@@ -36,41 +35,15 @@ export class InstagramIgLoginAuthService implements IInstagramIgLoginAuthService
     const granted = await this.client.getGrantedPermissions(accessToken);
 
     if (!this.client.hasRequiredPermissions(granted)) {
-      const required = ["pages_show_list", "instagram_basic", "instagram_manage_insights"];
+      const required = [
+        "pages_show_list",
+        "instagram_basic",
+        "instagram_manage_insights",
+      ];
       const missing = required.filter((p) => !granted.has(p));
 
       return {
-        status: "reauth_required",
-        loginUrl: this.buildLoginUrl(
-          `ig_reauth_${Date.now()}`,
-          true 
-        ),
-        missingPermissions: missing,
-      };
-    }
-
-    const me = await this.client.getMe(accessToken);
-
-    return {
-      status: "ok",
-      data: me,
-    };
-  }
-
-  async resolveCandidatesOrReauth(
-    accessToken: string
-  ): Promise<
-    | { status: "ok"; candidates: IgCandidate[] }
-    | InstagramAuthReauthRequired
-  > {
-    const granted = await this.client.getGrantedPermissions(accessToken);
-
-    if (!this.client.hasRequiredPermissions(granted)) {
-      const required = ["pages_show_list", "instagram_basic", "instagram_manage_insights"];
-      const missing = required.filter((p) => !granted.has(p));
-
-      return {
-        status: "reauth_required",
+        status: "reauth_required" as const,
         loginUrl: this.buildLoginUrl(`ig_reauth_${Date.now()}`, true),
         missingPermissions: missing,
       };
@@ -79,10 +52,15 @@ export class InstagramIgLoginAuthService implements IInstagramIgLoginAuthService
     const candidates = await this.client.getCandidates(accessToken);
 
     return {
-      status: "ok",
+      status: "ok" as const,
       candidates,
     };
   }
+
+  async resolveCandidatesOrReauth(accessToken: string) {
+    return this.resolveMeOrReauth(accessToken);
+  }
+
 
   async getMe(accessToken: string) {
     return this.client.getMe(accessToken);

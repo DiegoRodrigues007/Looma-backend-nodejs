@@ -20,7 +20,6 @@ export function setupSwagger(app: Express) {
       ],
       components: {
         securitySchemes: {
-          // ✅ Nome padrão mais comum e compatível com @openapi: bearerAuth
           bearerAuth: {
             type: "http",
             scheme: "bearer",
@@ -28,15 +27,18 @@ export function setupSwagger(app: Express) {
           },
         },
       },
-      // ✅ aplica por padrão (você pode sobrescrever por rota)
       security: [{ bearerAuth: [] }],
     },
 
-    // ✅ paths absolutos para evitar problemas de glob em Windows
+    // ✅ pega arquivos em subpastas (routes/**) + funciona em dev (src) e build (dist)
     apis: [
-      path.join(process.cwd(), "src/presentation/http/routes/*.ts"),
-      path.join(process.cwd(), "src/presentation/http/controllers/*.ts"),
-      // se você tiver docs em outros lugares, pode adicionar aqui
+      // DEV (ts)
+      path.join(process.cwd(), "src/presentation/http/routes/**/*.ts"),
+      path.join(process.cwd(), "src/presentation/http/controllers/**/*.ts"),
+
+      // BUILD (js) - quando rodar pelo dist
+      path.join(process.cwd(), "dist/presentation/http/routes/**/*.js"),
+      path.join(process.cwd(), "dist/presentation/http/controllers/**/*.js"),
     ],
   };
 

@@ -1,12 +1,9 @@
 import { prisma } from "../../../infrastructure/db/prismaClient";
 import { ymd } from "./instagramDateUtils";
 
-function dayStartUtc(ymdStr: string) {
-  return new Date(`${ymdStr}T00:00:00.000Z`);
-}
-
-function dayEndUtc(ymdStr: string) {
-  return new Date(`${ymdStr}T23:59:59.999Z`);
+function dateOnlyUtcFromYmd(ymdStr: string) {
+  const s = String(ymdStr ?? "").slice(0, 10);
+  return new Date(`${s}T00:00:00.000Z`);
 }
 
 export async function getFollowersSeriesFromDb(params: {
@@ -17,21 +14,28 @@ export async function getFollowersSeriesFromDb(params: {
 }): Promise<Record<string, number>> {
   const { userId, instagramAccountId, from, to } = params;
 
-  const rows = await prisma.instagramFollowersDaily.findMany({
+  const fromDate = dateOnlyUtcFromYmd(from);
+  const toDate = dateOnlyUtcFromYmd(to);
+
+  const rows = await prisma.instagramAccountDailyMetrics.findMany({
     where: {
       userId,
       instagramAccountId,
       day: {
-        gte: dayStartUtc(from),
-        lte: dayEndUtc(to),
+        gte: fromDate,
+        lte: toDate,
       },
     },
     orderBy: { day: "asc" },
+    select: {
+      day: true,
+      followers: true,
+    },
   });
 
   const result: Record<string, number> = {};
-  for (const r of rows) {
-    result[ymd(r.day)] = r.followers;
+  for (const r of rows as any[]) {
+    result[ymd(r.day as Date)] = Number(r.followers ?? 0);
   }
 
   return result;
@@ -44,28 +48,24 @@ export async function saveTodayFollowersSnapshot(params: {
 }): Promise<void> {
   const { userId, instagramAccountId, followers } = params;
 
-  const today = ymd(new Date());
-  const day = dayStartUtc(today);
+  const todayYmd = ymd(new Date());
+  const day = dateOnlyUtcFromYmd(todayYmd);
 
-  const existing = await prisma.instagramFollowersDaily.findFirst({
-    where: { userId, instagramAccountId, day },
-    select: { id: true },
-  });
-
-  if (existing) {
-    await prisma.instagramFollowersDaily.update({
-      where: { id: existing.id },
-      data: { followers },
-    });
-    return;
-  }
-
-  await prisma.instagramFollowersDaily.create({
-    data: {
+  await prisma.instagramAccountDailyMetrics.upsert({
+    where: {
+      instagramAccountId_day: { instagramAccountId, day },
+    },
+    update: {
+      followers: Number(followers ?? 0),
+    },
+    create: {
       userId,
       instagramAccountId,
       day,
-      followers,
+      followers: Number(followers ?? 0),
+      profileViewsTotal: 0,
+      reach: 0,
+      totalInteractions: 0,
     },
   });
 }

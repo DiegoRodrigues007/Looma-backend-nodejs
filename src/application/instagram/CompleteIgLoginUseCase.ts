@@ -1,11 +1,15 @@
 import { randomBytes, createHash } from "crypto";
-import { IInstagramIgLoginAuthService } from "./IInstagramIgLoginAuthService";
+import {
+  IInstagramIgLoginAuthService,
+  InstagramAuthReauthRequired,
+  InstagramAuthResolved,
+} from "./IInstagramIgLoginAuthService";
 import { IInstagramTokenStore } from "./IInstagramTokenStore";
 
-/**
- * ✅ O frontend não precisa receber tokens.
- * Ele só precisa escolher qual IG/Page conectar.
- */
+/* =========================
+   DTOs
+========================= */
+
 export type InstagramCandidateDTO = {
   igUserId: string;
   username: string;
@@ -15,15 +19,21 @@ export type InstagramCandidateDTO = {
   source: "instagram_business_account" | "connected_instagram_account";
 };
 
+export type InstagramCandidateForDb = InstagramCandidateDTO & {
+  pageAccessToken: string;
+};
+
 export interface InstagramLoginResult {
   igUserId: string;
   username: string;
   accountType: string;
 
-  accessToken: string; // para uso interno/retorno (preferir pageAccessToken quando existir)
+  /** ✅ token do usuário IG (long token) */
+  accessToken: string;
   expiresAt?: Date | null;
 
   facebookPageId?: string | null;
+  /** ✅ token da página FB usada para endpoints IG */
   pageAccessToken?: string | null;
 }
 
@@ -33,39 +43,93 @@ export type InstagramLoginReauthRequired = {
   missingPermissions: string[];
 };
 
-/**
- * ✅ Novo: quando o backend precisa que o usuário escolha
- */
 export type InstagramLoginChooseRequired = {
   status: "choose_required";
   selectionId: string;
   candidates: InstagramCandidateDTO[];
 };
 
-/**
- * ✅ Confirm payload: usuário escolhe 1 ou várias contas
- */
+export type InstagramLoginOk = {
+  status: "ok";
+};
+
 export type InstagramConfirmSelectionInput = Array<{
   igUserId: string;
   facebookPageId: string;
 }>;
 
-/**
- * Internal (guardado no cache, não vai pro frontend)
- */
 type PendingSelection = {
   userId: string;
   longToken: string;
   expiresAt?: Date | null;
   createdAt: number;
 
-  // candidates completos (inclui pageAccessToken)
-  candidates: Array<
-    InstagramCandidateDTO & {
-      pageAccessToken: string; // necessário pra salvar e usar API
-    }
-  >;
+  candidates: Array<InstagramCandidateForDb>;
 };
+
+/* =========================
+   Helpers
+========================= */
+
+function s(v: any): string {
+  return String(v ?? "").trim();
+}
+
+function isValidSource(
+  v: any
+): v is InstagramCandidateDTO["source"] {
+  return v === "instagram_business_account" || v === "connected_instagram_account";
+}
+
+function normalizeCandidateDTO(c: any): InstagramCandidateDTO {
+  const sourceRaw = c?.source;
+
+  return {
+    igUserId: s(c?.igUserId),
+    username: s(c?.username),
+    accountType: s(c?.accountType),
+    facebookPageId: s(c?.facebookPageId),
+    facebookPageName: c?.facebookPageName ? s(c.facebookPageName) : undefined,
+    source: isValidSource(sourceRaw)
+      ? sourceRaw
+      : "instagram_business_account", // fallback seguro (ou ajuste se preferir lançar erro)
+  };
+}
+
+/**
+ * ✅ aceita várias chaves possíveis do Graph:
+ * - pageAccessToken (camel)
+ * - page_access_token (snake)
+ * - access_token (quando o objeto é de page)
+ */
+function normalizeCandidateForDb(c: any): InstagramCandidateForDb {
+  const sourceRaw = c?.source;
+
+  const pageAccessToken =
+    s(c?.pageAccessToken) ||
+    s(c?.page_access_token) ||
+    s(c?.access_token);
+
+  return {
+    igUserId: s(c?.igUserId),
+    username: s(c?.username),
+    accountType: s(c?.accountType),
+    facebookPageId: s(c?.facebookPageId),
+    facebookPageName: c?.facebookPageName ? s(c.facebookPageName) : undefined,
+    source: isValidSource(sourceRaw)
+      ? sourceRaw
+      : "instagram_business_account",
+    pageAccessToken, // ✅ obrigatório no DB
+  };
+}
+
+function keyOf(igUserId: string, facebookPageId: string) {
+  return `${s(igUserId)}|${s(facebookPageId)}`;
+}
+
+/* =========================
+   UseCase
+========================= */
 
 export class CompleteIgLoginUseCase {
   constructor(
@@ -73,13 +137,10 @@ export class CompleteIgLoginUseCase {
     private readonly tokenStore: IInstagramTokenStore
   ) {}
 
-  /* =========================
-     Pending cache (in-memory)
-     - depois você troca por Redis/DB
-  ========================= */
-
   private static readonly pending = new Map<string, PendingSelection>();
-  private static readonly ttlMs = Number(process.env.IG_LOGIN_CHOOSE_TTL_MS ?? 10 * 60 * 1000);
+  private static readonly ttlMs = Number(
+    process.env.IG_LOGIN_CHOOSE_TTL_MS ?? 10 * 60 * 1000
+  );
 
   private static cleanupExpired() {
     const now = Date.now();
@@ -104,7 +165,6 @@ export class CompleteIgLoginUseCase {
     if (!pending) {
       throw new Error("Seleção expirada ou inválida. Refaça o login do Instagram.");
     }
-
     if (pending.userId !== userId) {
       throw new Error("Seleção não pertence a este usuário.");
     }
@@ -118,50 +178,21 @@ export class CompleteIgLoginUseCase {
     return pending;
   }
 
-  /* =========================
-     STEP A: callback -> candidates
-  ========================= */
-
-  /**
-   * Completa o login do Instagram e devolve candidates pro frontend escolher:
-   * - troca code -> short token
-   * - troca short -> long token
-   * - valida permissões reais
-   * - se faltar algo → reauth_required
-   * - resolve contas IG (Business/Creator) via Pages
-   * - devolve candidates e guarda tokens temporariamente (cache)
-   *
-   * ⚠️ NÃO salva tokens definitivos aqui.
-   */
   async execute(
     code: string,
     state: string,
     userId: string
-  ): Promise<InstagramLoginChooseRequired | InstagramLoginReauthRequired> {
-    if (!code || code.trim().length === 0) {
-      throw new Error("code é obrigatório");
-    }
-    if (!userId || userId.trim().length === 0) {
-      throw new Error("userId é obrigatório");
-    }
+  ): Promise<InstagramLoginChooseRequired | InstagramLoginReauthRequired | InstagramLoginOk> {
+    if (!code || s(code).length === 0) throw new Error("code é obrigatório");
+    if (!userId || s(userId).length === 0) throw new Error("userId é obrigatório");
 
     CompleteIgLoginUseCase.cleanupExpired();
 
-    /* =========================
-       1) code -> short token
-    ========================= */
     const { shortToken } = await this.auth.exchangeCodeForShortToken(code);
-
-    /* =========================
-       2) short -> long token
-    ========================= */
     const { longToken, expiresAt } = await this.auth.exchangeShortForLong(shortToken);
 
-    /* =========================
-       3) Resolver candidates OU reauth
-    ========================= */
-    // @ts-expect-error: se a interface ainda não tiver esse método, adicione nele também
-    const resolved = await this.auth.resolveCandidatesOrReauth(longToken);
+    const resolved: InstagramAuthResolved | InstagramAuthReauthRequired =
+      await this.auth.resolveMeOrReauth(longToken);
 
     if (resolved.status === "reauth_required") {
       return {
@@ -172,7 +203,6 @@ export class CompleteIgLoginUseCase {
     }
 
     const candidatesRaw = resolved.candidates ?? [];
-
     if (!candidatesRaw.length) {
       throw new Error(
         "Nenhuma conta do Instagram foi encontrada para este login. " +
@@ -181,33 +211,18 @@ export class CompleteIgLoginUseCase {
       );
     }
 
-    // Monta DTO pro frontend (sem token)
-    const candidates: InstagramCandidateDTO[] = candidatesRaw.map((c: any) => ({
-      igUserId: String(c.igUserId),
-      username: String(c.username),
-      accountType: String(c.accountType),
-      facebookPageId: String(c.facebookPageId),
-      facebookPageName: c.facebookPageName ? String(c.facebookPageName) : undefined,
-      source: c.source,
-    }));
+    // ✅ lista “pública” (sem token)
+    const candidatesPublic: InstagramCandidateDTO[] = candidatesRaw.map(normalizeCandidateDTO);
 
-    // Guarda no cache (com pageAccessToken)
-    const selectionId = CompleteIgLoginUseCase.createSelectionId(userId);
+    const selectionId = CompleteIgLoginUseCase.createSelectionId(s(userId));
 
+    // ✅ pendência com token (pra persistir/confirmar depois)
     const pending: PendingSelection = {
-      userId,
-      longToken,
+      userId: s(userId),
+      longToken: s(longToken),
       expiresAt: expiresAt ?? null,
       createdAt: Date.now(),
-      candidates: candidatesRaw.map((c: any) => ({
-        igUserId: String(c.igUserId),
-        username: String(c.username),
-        accountType: String(c.accountType),
-        facebookPageId: String(c.facebookPageId),
-        facebookPageName: c.facebookPageName ? String(c.facebookPageName) : undefined,
-        source: c.source,
-        pageAccessToken: String(c.pageAccessToken),
-      })),
+      candidates: candidatesRaw.map(normalizeCandidateForDb),
     };
 
     CompleteIgLoginUseCase.pending.set(selectionId, pending);
@@ -215,32 +230,32 @@ export class CompleteIgLoginUseCase {
     return {
       status: "choose_required",
       selectionId,
-      candidates,
+      candidates: candidatesPublic,
     };
   }
 
-  /* =========================
-     STEP A.1: GET candidates by selectionId
-  ========================= */
-
   /**
-   * ✅ Novo:
-   * O frontend pode chamar /candidates depois do callback com selectionId
-   * para re-renderizar a lista sem repetir login.
+   * ✅ COMPAT: o seu controller estava chamando esse nome.
+   * Retorna o pending inteiro (inclui longToken/expiresAt e candidates com pageAccessToken).
    */
-  async getCandidates(params: {
-    selectionId: string;
-    userId: string;
-  }): Promise<InstagramCandidateDTO[]> {
-    const selectionId = String(params.selectionId ?? "").trim();
-    const userId = String(params.userId ?? "").trim();
-
+  getPendingForPersist(params: { selectionId: string; userId: string }): PendingSelection {
+    const selectionId = s(params.selectionId);
+    const userId = s(params.userId);
     if (!selectionId) throw new Error("selectionId é obrigatório");
     if (!userId) throw new Error("userId é obrigatório");
 
-    const pending = CompleteIgLoginUseCase.assertPendingOrThrow(selectionId, userId);
+    return CompleteIgLoginUseCase.assertPendingOrThrow(selectionId, userId);
+  }
 
-    // devolve apenas DTO (sem tokens)
+  /** ✅ candidates para persistir no banco (COM pageAccessToken) */
+  getCandidatesForDb(params: { selectionId: string; userId: string }): InstagramCandidateForDb[] {
+    const pending = this.getPendingForPersist(params);
+    return pending.candidates;
+  }
+
+  getCandidates(params: { selectionId: string; userId: string }): InstagramCandidateDTO[] {
+    const pending = this.getPendingForPersist(params);
+
     return pending.candidates.map((c) => ({
       igUserId: c.igUserId,
       username: c.username,
@@ -251,23 +266,13 @@ export class CompleteIgLoginUseCase {
     }));
   }
 
-  /* =========================
-     STEP B: confirm -> persist 1..N
-  ========================= */
-
-  /**
-   * Confirma as seleções feitas no frontend e salva 1 ou várias contas.
-   *
-   * - selections: [{igUserId, facebookPageId}, ...]
-   * - persiste cada conta separadamente (multi-conta)
-   */
   async confirmSelection(params: {
     selectionId: string;
     userId: string;
     selections: InstagramConfirmSelectionInput;
   }): Promise<InstagramLoginResult[]> {
-    const selectionId = String(params.selectionId ?? "").trim();
-    const userId = String(params.userId ?? "").trim();
+    const selectionId = s(params.selectionId);
+    const userId = s(params.userId);
     const selections = params.selections;
 
     if (!selectionId) throw new Error("selectionId é obrigatório");
@@ -278,19 +283,17 @@ export class CompleteIgLoginUseCase {
 
     const pending = CompleteIgLoginUseCase.assertPendingOrThrow(selectionId, userId);
 
-    // Index candidates
     const byKey = new Map<string, PendingSelection["candidates"][number]>();
     for (const c of pending.candidates) {
-      byKey.set(`${c.igUserId}|${c.facebookPageId}`, c);
+      byKey.set(keyOf(c.igUserId, c.facebookPageId), c);
     }
 
-    // dedup selections
     const uniq = new Map<string, { igUserId: string; facebookPageId: string }>();
-    for (const s of selections) {
-      const igUserId = String((s as any)?.igUserId ?? "").trim();
-      const facebookPageId = String((s as any)?.facebookPageId ?? "").trim();
+    for (const s0 of selections) {
+      const igUserId = s((s0 as any)?.igUserId);
+      const facebookPageId = s((s0 as any)?.facebookPageId);
       if (!igUserId || !facebookPageId) continue;
-      uniq.set(`${igUserId}|${facebookPageId}`, { igUserId, facebookPageId });
+      uniq.set(keyOf(igUserId, facebookPageId), { igUserId, facebookPageId });
     }
 
     if (uniq.size === 0) {
@@ -300,32 +303,34 @@ export class CompleteIgLoginUseCase {
     const results: InstagramLoginResult[] = [];
 
     for (const { igUserId, facebookPageId } of uniq.values()) {
-      const c = byKey.get(`${igUserId}|${facebookPageId}`);
+      const c = byKey.get(keyOf(igUserId, facebookPageId));
       if (!c) {
         throw new Error(
           `Seleção não encontrada entre os candidates: igUserId=${igUserId} pageId=${facebookPageId}`
         );
       }
 
-      const username = String(c.username ?? "").trim();
-      const accountType = String(c.accountType ?? "").trim();
-      const pageAccessToken = String((c as any).pageAccessToken ?? "").trim();
+      const username = s(c.username);
+      const accountType = s(c.accountType);
+      const pageAccessToken = s(c.pageAccessToken);
 
       if (!username) throw new Error(`username vazio para igUserId=${igUserId}`);
       if (!accountType) throw new Error(`accountType vazio para igUserId=${igUserId}`);
-      if (!pageAccessToken) throw new Error(`pageAccessToken vazio para igUserId=${igUserId}`);
+      if (!pageAccessToken) {
+        throw new Error(
+          `pageAccessToken vazio para igUserId=${igUserId}. ` +
+            "Isso normalmente indica que o token da página não foi retornado pelo Graph API."
+        );
+      }
 
-      // ✅ Persistência: salva longToken + pageAccessToken + facebookPageId
       await this.tokenStore.saveOrUpdate({
         userId,
         igUserId,
         username,
         accountType,
-
-        accessToken: pending.longToken,
-        pageAccessToken,
+        accessToken: pending.longToken, // ✅ long token do usuário
+        pageAccessToken,                // ✅ token da página
         facebookPageId,
-
         expiresAt: pending.expiresAt ?? null,
         lastRefreshedAt: new Date(),
         isConnected: true,
@@ -335,16 +340,14 @@ export class CompleteIgLoginUseCase {
         igUserId,
         username,
         accountType,
-        accessToken: pageAccessToken || pending.longToken,
+        accessToken: pending.longToken,
         expiresAt: pending.expiresAt ?? null,
         facebookPageId,
         pageAccessToken,
       });
     }
 
-    // limpa selection (uso único)
     CompleteIgLoginUseCase.pending.delete(selectionId);
-
     return results;
   }
 }
