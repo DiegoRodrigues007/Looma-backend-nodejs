@@ -1,4 +1,4 @@
-import { KpiComparativeDTO, TrendDirection } from "../dto/metrics/KpiComparativeDTO";
+import { KpiComparativeDTO, TrendDirection } from "../../../application/dto/metrics/KpiComparativeDTO";
 
 export function compareEngagement(
   current: number,

@@ -1,5 +1,5 @@
 // src/application/insights/PostInsightRulesService.ts
-import { PostInsightRaw } from "./PostInsightDataService";
+import { PostInsightRaw } from "../../application/services/insights/PostInsightDataService";
 
 /* =========================
    Types

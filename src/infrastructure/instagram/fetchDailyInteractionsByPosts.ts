@@ -1,7 +1,11 @@
 import axios from "axios";
 import type { AxiosResponse } from "axios";
 import { parseYmd, ymd } from "../../shared/date/instagramDateUtils";
-import { toFiniteNumber } from "./mappers/instagramInsightsMapper";
+import { toFiniteNumber } from "../../domain/metrics/instagram/instagramInsightsMapper";
+import {
+  addByDay,
+  sumInteractions,
+} from "../../domain/metrics/calculators/dailyAggregators";
 
 type IgMediaItem = {
   id: string;
@@ -56,8 +60,8 @@ async function asyncPool<T, R>(
 export async function fetchDailyInteractionsByPosts(opts: {
   igUserId: string;
   accessToken: string;
-  from: string; 
-  to: string;   
+  from: string;
+  to: string;
   graph: ReturnType<typeof axios.create>;
 }) {
   const { igUserId, accessToken, from, to, graph } = opts;
@@ -104,18 +108,19 @@ export async function fetchDailyInteractionsByPosts(opts: {
   const savesByDay: Record<string, number> = {};
   const totalByDay: Record<string, number> = {};
 
-  const add = (map: Record<string, number>, day: string, v: number) => {
-    map[day] = (map[day] ?? 0) + (Number.isFinite(v) ? v : 0);
-  };
-
   for (const m of inRange) {
     const day = ymd(new Date(m.timestamp));
     const likes = toFiniteNumber(m.like_count);
     const comments = toFiniteNumber(m.comments_count);
 
-    add(likesByDay, day, likes);
-    add(commentsByDay, day, comments);
-    add(totalByDay, day, likes + comments);
+    addByDay(likesByDay, day, likes);
+    addByDay(commentsByDay, day, comments);
+
+    addByDay(
+      totalByDay,
+      day,
+      sumInteractions({ likes, comments })
+    );
   }
 
   await asyncPool(6, inRange, async (m) => {
@@ -148,12 +153,16 @@ export async function fetchDailyInteractionsByPosts(opts: {
 
       const shares = toFiniteNumber(map.shares);
       const saved = toFiniteNumber(map.saved);
-
       const day = ymd(new Date(m.timestamp));
 
-      add(sharesByDay, day, shares);
-      add(savesByDay, day, saved);
-      add(totalByDay, day, shares + saved);
+      addByDay(sharesByDay, day, shares);
+      addByDay(savesByDay, day, saved);
+
+      addByDay(
+        totalByDay,
+        day,
+        sumInteractions({ shares, saved })
+      );
     } catch {
     }
   });

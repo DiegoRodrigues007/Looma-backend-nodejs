@@ -5,7 +5,7 @@ import type {
   PostInsightResult,
   ProvenItem,
   EvidenceMetric,
-} from "./PostInsightRulesService";
+} from "../../../domain/insights/PostInsightRules";
 
 export type NarratedItem = {
   headline: string;

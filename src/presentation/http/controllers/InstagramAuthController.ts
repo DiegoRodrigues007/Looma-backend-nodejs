@@ -7,7 +7,7 @@ import { CompleteIgLoginUseCase } from "../../../application/use-cases/instagram
 import { ListInstagramAccountsUseCase } from "../../../application/use-cases/instagram/ListInstagramAccountsUseCase";
 import { SetActiveInstagramAccountUseCase } from "../../../application/use-cases/instagram/SetActiveInstagramAccountUseCase";
 import { ymd, listDays } from "../../../shared/date/instagramDateUtils";
-import { toFiniteNumber } from "../../../infrastructure/instagram/mappers/instagramInsightsMapper";
+import { toFiniteNumber } from "../../../domain/metrics/instagram/instagramInsightsMapper";
 import {
   setIgLoginCookie,
   getIgLoginCookie,
@@ -18,7 +18,7 @@ import { GetInstagramDashboardMetricsUseCase } from "../../../application/use-ca
 import {
   buildWindowsSummary,
   type InstagramTimeseriesPoint,
-} from "../../../domain/services/metricsWindows";
+} from "../../../domain/metrics/windows/metricsWindows";
 
 
 function s(v: any): string {

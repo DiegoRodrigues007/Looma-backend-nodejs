@@ -1,14 +1,8 @@
 import { IMetricsSnapshotRepository } from "../../../domain/repositories/IMetricsSnapshotRepository";
 import { MetricsSnapshot, MetricsPlatform } from "../../../domain/entities/MetricsSnapshot";
+import { aggregateSnapshotsAverage } from "../../../domain/metrics/calculators/aggregateSnapshots";
 
 type SnapshotInput = Omit<MetricsSnapshot, "userId" | "platform" | "date">;
-
-type Totals = {
-  followers: number;
-  reach: number;
-  totalInteractions: number;
-  engagementRate: number;
-};
 
 export class MetricsHistoryService {
   constructor(private readonly repo: IMetricsSnapshotRepository) {}
@@ -85,36 +79,13 @@ export class MetricsHistoryService {
   ): Promise<MetricsSnapshot | null> {
     const range = this.normalizeRange(from, to);
 
-    const data: MetricsSnapshot[] = await this.repo.findRange(
+    const data = await this.repo.findRange(userId, platform, range.from, range.to);
+
+    return aggregateSnapshotsAverage({
       userId,
       platform,
-      range.from,
-      range.to
-    );
-
-    if (data.length === 0) return null;
-
-    const total = data.reduce(
-      (acc: Totals, d: MetricsSnapshot) => {
-        acc.followers += d.followers;
-        acc.reach += d.reach;
-        acc.totalInteractions += d.totalInteractions;
-        acc.engagementRate += d.engagementRate;
-        return acc;
-      },
-      { followers: 0, reach: 0, totalInteractions: 0, engagementRate: 0 }
-    );
-
-    const count = data.length;
-
-    return new MetricsSnapshot(
-      userId,
-      platform,
-      range.to,
-      Math.round(total.followers / count),
-      Math.round(total.reach / count),
-      Math.round(total.totalInteractions / count),
-      total.engagementRate / count
-    );
+      date: range.to,
+      data,
+    });
   }
 }

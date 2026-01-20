@@ -2,7 +2,7 @@ import type { PrismaClient } from "@prisma/client";
 import {
   buildWindowsSummary,
   type InstagramTimeseriesPoint,
-} from "../../../domain/services/metricsWindows";
+} from "../../../domain/metrics/windows/metricsWindows";
 
 type DailyMetricRow = {
   day: Date;
