@@ -1,272 +1,409 @@
-// src/application/jobs/InstagramBackfillWorker.ts
+// src/infrastructure/jobs/InstagramBackfillWorker.ts
 import { prisma } from "../db/prismaClient";
-import { InstagramBackfillService } from "../../application/instagram/InstagramBackfillService";
+import { RunInstagramBackfillUseCase } from "../../application/use-cases/instagram/RunInstagramBackfillUseCase";
 
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-function clampInt(n: number, min: number, max: number, fallback: number) {
-  const v = Number(n);
-  if (!Number.isFinite(v)) return fallback;
-  return Math.min(max, Math.max(min, Math.floor(v)));
-}
-
-type WorkerOptions = {
-  // quantos jobs simultâneos (deixe 1 por enquanto pra não estourar rate limit)
-  concurrency?: number;
-
-  // intervalo pra procurar job novo
-  pollMs?: number;
-
-  // limites por execução (você pode ajustar depois)
-  maxPosts?: number;
-  maxPages?: number;
-
-  // rate-limit simples
-  perPostDelayMs?: number;
-  perPageDelayMs?: number;
-
-  // ✅ logs
-  log?: (msg: string, extra?: any) => void;
-
-  /**
-   * ✅ Hook opcional (pra quando você quiser preencher instagramPostInsightResults)
-   * - Não é obrigatório agora.
-   * - O service.run pode chamar isso por post (se você implementar no service).
-   */
-  onPostImported?: (payload: {
-    userId: string;
-    instagramAccountId: string | null;
-    igUserId: string;
-    postDbId: string; // id do instagramPost no seu banco
-    igMediaId: string;
-  }) => Promise<void>;
+type BackfillJob = {
+  jobId: string;
+  userId: string;
+  instagramAccountId?: string | null;
+  from: string;
+  to: string;
+  force?: boolean;
+  refillZeros?: boolean;
 };
 
-export function startInstagramBackfillWorker(opts: WorkerOptions = {}) {
-  const service = new InstagramBackfillService();
+function s(v: any): string {
+  return String(v ?? "").trim();
+}
 
-  const concurrency = clampInt(opts.concurrency ?? 1, 1, 5, 1);
-  const pollMs = clampInt(opts.pollMs ?? 1500, 500, 10000, 1500);
+function pad2(n: number) {
+  return n < 10 ? `0${n}` : String(n);
+}
 
-  const maxPosts = clampInt(opts.maxPosts ?? 300, 10, 5000, 300);
-  const maxPages = clampInt(opts.maxPages ?? 20, 1, 200, 20);
+function toYmd(d: Date): string {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
 
-  const perPostDelayMs = clampInt(opts.perPostDelayMs ?? 120, 0, 5000, 120);
-  const perPageDelayMs = clampInt(opts.perPageDelayMs ?? 150, 0, 5000, 150);
+function addDays(d: Date, days: number) {
+  const x = new Date(d);
+  x.setDate(x.getDate() + days);
+  return x;
+}
 
-  const log =
-    opts.log ??
-    ((msg: string, extra?: any) => {
-      try {
-        console.log(msg, extra ?? "");
-      } catch {
-        console.log(msg);
-      }
+function nowTag() {
+  const d = new Date();
+  return `${toYmd(d)} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(
+    d.getSeconds()
+  )}`;
+}
+
+/**
+ * Se seu model InstagramBackfillJob NÃO tiver "from/to",
+ * a gente aplica defaults:
+ * - from: hoje - 90 dias
+ * - to: hoje
+ */
+function resolveFromTo(job: any): { from: string; to: string } {
+  const today = new Date();
+  const defFrom = toYmd(addDays(today, -90));
+  const defTo = toYmd(today);
+
+  const from = s(job?.from ?? "").slice(0, 10) || defFrom;
+  const to = s(job?.to ?? "").slice(0, 10) || defTo;
+
+  return { from, to };
+}
+
+export class InstagramBackfillWorker {
+  private readonly queue: BackfillJob[] = []; // opcional (debug)
+  private running = 0;
+  private started = false;
+  private tickCount = 0;
+
+  constructor(
+    private readonly useCase: RunInstagramBackfillUseCase,
+    private readonly options?: {
+      maxParallelJobs?: number;
+      jobPollIntervalMs?: number;
+      backfillConcurrency?: number;
+      alwaysRefetchLastDays?: number;
+    }
+  ) {}
+
+  start() {
+    if (this.started) return;
+    this.started = true;
+
+    const poll = Math.max(
+      100,
+      Number(this.options?.jobPollIntervalMs ?? 300) || 300
+    );
+
+    console.log(`🧵 [IG BACKFILL][${nowTag()}] Worker STARTED`, {
+      pollMs: poll,
+      maxParallelJobs: this.options?.maxParallelJobs ?? 1,
+      backfillConcurrency: this.options?.backfillConcurrency ?? 2,
+      alwaysRefetchLastDays: this.options?.alwaysRefetchLastDays ?? 7,
     });
 
-  let active = 0;
-  let stopped = false;
+    // sanity: testa conexão prisma no boot
+    prisma
+      .$queryRaw`SELECT 1`
+      .then(() =>
+        console.log(`✅ [IG BACKFILL][${nowTag()}] Prisma connection OK`)
+      )
+      .catch((e: any) =>
+        console.error(
+          `❌ [IG BACKFILL][${nowTag()}] Prisma connection FAIL:`,
+          e?.message ?? e
+        )
+      );
 
-  // ✅ backoff simples quando der erro geral (db/network)
-  let errorStreak = 0;
-  const maxBackoff = 8000;
+    setInterval(() => {
+      this.tick().catch((e) => {
+        console.error(
+          `❌ [IG BACKFILL][${nowTag()}] tick() crashed:`,
+          e?.message ?? e
+        );
+      });
+    }, poll);
+  }
 
-  /**
-   * ✅ Claim ATÔMICO:
-   * - funciona mesmo com múltiplas instâncias do worker
-   * - pega o primeiro queued e já marca running numa única transação
-   */
-  async function claimOneJobAtomic() {
-    return prisma.$transaction(async (tx) => {
-      const job = await tx.instagramBackfillJob.findFirst({
+  enqueue(job: Omit<BackfillJob, "jobId">) {
+    const jobId = `bf_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    this.queue.push({ jobId, ...job });
+    console.log(`📥 [IG BACKFILL][${nowTag()}] enqueue(memory)`, {
+      jobId,
+      userId: job.userId,
+      instagramAccountId: job.instagramAccountId ?? null,
+      from: job.from,
+      to: job.to,
+    });
+    return { jobId };
+  }
+
+  getStats() {
+    return {
+      queuedInMemory: this.queue.length,
+      running: this.running,
+      maxParallelJobs: Math.max(
+        1,
+        Number(this.options?.maxParallelJobs ?? 1) || 1
+      ),
+    };
+  }
+
+  private async tick() {
+    this.tickCount++;
+
+    const maxParallel = Math.max(
+      1,
+      Number(this.options?.maxParallelJobs ?? 1) || 1
+    );
+
+    // log básico de vida
+    console.log(`🔁 [IG BACKFILL][${nowTag()}] tick #${this.tickCount}`, {
+      running: this.running,
+      maxParallel,
+      memQueue: this.queue.length,
+    });
+
+    if (this.running >= maxParallel) {
+      console.log(
+        `⏭️ [IG BACKFILL][${nowTag()}] skip tick (running>=maxParallel)`
+      );
+      return;
+    }
+
+    // 1) prioridade: consumir DB
+    const dbJob = await this.takeNextDbJob();
+    if (dbJob) {
+      console.log(`🎯 [IG BACKFILL][${nowTag()}] got DB job`, {
+        id: dbJob.id,
+        status: dbJob.status,
+        userId: dbJob.userId,
+        instagramAccountId: dbJob.instagramAccountId,
+      });
+
+      this.running++;
+      this.runDbJob(dbJob)
+        .catch((e) => {
+          console.error(
+            `❌ [IG BACKFILL][${nowTag()}] runDbJob crashed:`,
+            e?.message ?? e
+          );
+        })
+        .finally(() => {
+          this.running--;
+          console.log(`⬇️ [IG BACKFILL][${nowTag()}] job finished (slot freed)`, {
+            running: this.running,
+          });
+        });
+      return;
+    }
+
+    console.log(`ℹ️ [IG BACKFILL][${nowTag()}] no DB queued job found`);
+
+    // 2) fallback: fila em memória
+    if (this.queue.length === 0) return;
+
+    const memJob = this.queue.shift();
+    if (!memJob) return;
+
+    console.log(`🎯 [IG BACKFILL][${nowTag()}] got MEMORY job`, {
+      jobId: memJob.jobId,
+      userId: memJob.userId,
+      instagramAccountId: memJob.instagramAccountId ?? null,
+      from: memJob.from,
+      to: memJob.to,
+    });
+
+    this.running++;
+    this.runMemoryJob(memJob)
+      .catch((e) => {
+        console.error(
+          `❌ [IG BACKFILL][${nowTag()}] runMemoryJob crashed:`,
+          e?.message ?? e
+        );
+      })
+      .finally(() => {
+        this.running--;
+      });
+  }
+
+  private async takeNextDbJob() {
+    // diagnostico: quantos queued existem?
+    try {
+      const queuedCount = await prisma.instagramBackfillJob.count({
         where: { status: "queued" },
-        orderBy: { createdAt: "asc" },
       });
 
-      if (!job) return null;
+      console.log(`📊 [IG BACKFILL][${nowTag()}] DB queuedCount=${queuedCount}`);
 
-      // ⚠️ evita race condition: só atualiza se ainda estiver queued
-      const updated = await tx.instagramBackfillJob.updateMany({
-        where: { id: job.id, status: "queued" },
-        data: {
-          status: "running",
-          startedAt: new Date(),
-          lastError: null,
-        },
-      });
+      if (queuedCount === 0) return null;
+    } catch (e: any) {
+      console.error(
+        `❌ [IG BACKFILL][${nowTag()}] count queued failed:`,
+        e?.message ?? e
+      );
+      return null;
+    }
 
-      if (updated.count !== 1) return null;
-
-      return job;
+    // pega o mais antigo queued
+    const job = await prisma.instagramBackfillJob.findFirst({
+      where: { status: "queued" },
+      orderBy: { createdAt: "asc" },
     });
-  }
 
-  async function failJob(jobId: string, msg: string) {
-    await prisma.instagramBackfillJob.update({
-      where: { id: jobId },
-      data: { status: "error", lastError: msg, finishedAt: new Date() },
-    });
-  }
+    if (!job) {
+      console.log(
+        `ℹ️ [IG BACKFILL][${nowTag()}] findFirst queued returned null (race?)`
+      );
+      return null;
+    }
 
-  async function processJob(job: {
-    id: string;
-    userId: string;
-    instagramAccountId: string | null;
-    cursor: string | null;
-  }) {
-    log("[IG BACKFILL] start job", {
-      jobId: job.id,
+    console.log(`🧲 [IG BACKFILL][${nowTag()}] trying claim job`, {
+      id: job.id,
+      createdAt: job.createdAt,
       userId: job.userId,
       instagramAccountId: job.instagramAccountId,
-      cursor: job.cursor,
+    });
+
+    // claim atômico
+    const claimed = await prisma.instagramBackfillJob.updateMany({
+      where: { id: job.id, status: "queued" },
+      data: { status: "running", startedAt: new Date(), lastError: null },
+    });
+
+    console.log(`🧾 [IG BACKFILL][${nowTag()}] claim result`, {
+      id: job.id,
+      updatedRows: claimed.count,
+    });
+
+    if (claimed.count !== 1) {
+      console.log(
+        `⏭️ [IG BACKFILL][${nowTag()}] claim failed (someone else took it?)`
+      );
+      return null;
+    }
+
+    // relê como running
+    const runningJob = await prisma.instagramBackfillJob.findUnique({
+      where: { id: job.id },
+    });
+
+    if (!runningJob) {
+      console.log(
+        `⚠️ [IG BACKFILL][${nowTag()}] claimed but findUnique returned null`
+      );
+      return null;
+    }
+
+    return runningJob;
+  }
+
+  private async runDbJob(job: any) {
+    const userId = s(job?.userId);
+    const instagramAccountId = job?.instagramAccountId ?? null;
+    const { from, to } = resolveFromTo(job);
+
+    console.log(`🚧 [IG BACKFILL][${nowTag()}] RUN DB JOB`, {
+      id: job.id,
+      userId,
+      instagramAccountId,
+      from,
+      to,
+      concurrency: this.options?.backfillConcurrency ?? 2,
     });
 
     try {
-      // ✅ pega conta IG (multi-conta suportada)
-      // IMPORTANTE: no seu schema o campo é igUserId (e não instagramId)
-      const account = await prisma.instagramAccount.findFirst({
-        where: {
-          userId: job.userId,
-          isConnected: true,
-          ...(job.instagramAccountId ? { id: job.instagramAccountId } : {}),
-        },
-        orderBy: { updatedAt: "desc" },
-        select: {
-          id: true,
-          igUserId: true, // ✅ CORRETO
-          accessToken: true,
-          pageAccessToken: true,
-        },
+      await this.useCase.execute({
+        userId,
+        instagramAccountId,
+        from,
+        to,
+        force: !!job?.force,
+        refillZeros: job?.refillZeros ?? true,
+        alwaysRefetchLastDays: this.options?.alwaysRefetchLastDays ?? 7,
+        concurrency: this.options?.backfillConcurrency ?? 2,
       });
 
-      const igUserId = account?.igUserId ? String(account.igUserId) : null;
+      await prisma.instagramBackfillJob.update({
+        where: { id: job.id },
+        data: { status: "done", finishedAt: new Date(), lastError: null },
+      });
 
-      // ✅ prioriza pageAccessToken (melhor pros endpoints IG), senão accessToken
-      const accessToken =
-        (account?.pageAccessToken ?? account?.accessToken) ?? null;
+      console.log(`✅ [IG BACKFILL][${nowTag()}] DONE`, { id: job.id });
+    } catch (err: any) {
+      const message =
+        s(err?.message) || s(err) || "Erro desconhecido no backfill";
 
-      if (!account) {
-        await failJob(job.id, "InstagramAccount não encontrado para o usuário/job");
-        log("[IG BACKFILL] job error: account not found", {
-          jobId: job.id,
-          userId: job.userId,
-          instagramAccountId: job.instagramAccountId,
-        });
-        return;
-      }
+      console.error(`❌ [IG BACKFILL][${nowTag()}] FAILED`, {
+        id: job.id,
+        error: message,
+      });
 
-      if (!igUserId) {
-        await failJob(job.id, "igUserId ausente na conta do Instagram");
-        log("[IG BACKFILL] job error: missing igUserId", {
-          jobId: job.id,
-          instagramAccountId: account.id,
-        });
-        return;
-      }
-
-      if (!accessToken) {
-        await failJob(job.id, "Token ausente (pageAccessToken/accessToken) na conta do Instagram");
-        log("[IG BACKFILL] job error: missing accessToken", {
-          jobId: job.id,
-          instagramAccountId: account.id,
-        });
-        return;
-      }
-
-      // ✅ garante que o job está amarrado à conta (se não veio)
-      if (!job.instagramAccountId && account?.id) {
-        await prisma.instagramBackfillJob.update({
-          where: { id: job.id },
-          data: { instagramAccountId: account.id },
-        });
-      }
-
-      // ✅ Executa o service
-      await service.run({
-        userId: job.userId,
-        instagramAccountId: account?.id ?? null,
-        igUserId,
-        accessToken,
-        jobId: job.id,
-        maxPosts,
-        maxPages,
-        perPostDelayMs,
-        perPageDelayMs,
-        startAfterCursor: job.cursor,
-        // ✅ hook opcional (só funciona se o service repassar/usar)
-        onPostImported: opts.onPostImported,
-      } as any);
-
-      log("[IG BACKFILL] job finished (service returned)", { jobId: job.id });
-
-      // reset backoff em sucesso
-      errorStreak = 0;
-    } catch (e: any) {
-      const msg = String(e?.message ?? e ?? "WORKER_ERROR");
-      await failJob(job.id, msg);
-      log("[IG BACKFILL] job exception", { jobId: job.id, error: msg });
+      await prisma.instagramBackfillJob.update({
+        where: { id: job.id },
+        data: {
+          status: "failed",
+          finishedAt: new Date(),
+          lastError: message.slice(0, 4000),
+        },
+      });
     }
   }
 
-  async function loop() {
-    log("[IG BACKFILL] worker started", {
-      concurrency,
-      pollMs,
-      maxPosts,
-      maxPages,
-      perPostDelayMs,
-      perPageDelayMs,
+  private async runMemoryJob(job: BackfillJob) {
+    const userId = s(job.userId);
+    const from = s(job.from).slice(0, 10);
+    const to = s(job.to).slice(0, 10);
+
+    console.log(`🚧 [IG BACKFILL][${nowTag()}] RUN MEMORY JOB`, {
+      jobId: job.jobId,
+      userId,
+      instagramAccountId: job.instagramAccountId ?? null,
+      from,
+      to,
     });
 
-    while (!stopped) {
-      try {
-        // se tiver slot
-        if (active < concurrency) {
-          const job = await claimOneJobAtomic();
-          if (job) {
-            active++;
-
-            processJob({
-              id: job.id,
-              userId: job.userId,
-              instagramAccountId: job.instagramAccountId ?? null,
-              cursor: job.cursor ?? null,
-            })
-              .catch(() => {})
-              .finally(() => {
-                active--;
-              });
-          }
-        }
-
-        // sucesso -> backoff não cresce
-        await sleep(pollMs);
-      } catch (e: any) {
-        errorStreak++;
-        const backoff = Math.min(maxBackoff, 500 * errorStreak);
-        log("[IG BACKFILL] loop error/backoff", {
-          error: String(e?.message ?? e ?? "LOOP_ERROR"),
-          errorStreak,
-          backoffMs: backoff,
-        });
-        await sleep(backoff);
-      }
-    }
-
-    log("[IG BACKFILL] worker stopped");
+    await this.useCase.execute({
+      userId,
+      instagramAccountId: job.instagramAccountId ?? null,
+      from,
+      to,
+      force: !!job.force,
+      refillZeros: job.refillZeros ?? true,
+      alwaysRefetchLastDays: this.options?.alwaysRefetchLastDays ?? 7,
+      concurrency: this.options?.backfillConcurrency ?? 2,
+    });
   }
+}
 
-  loop().catch((e) => {
-    log("[IG BACKFILL] fatal loop error", {
-      error: String(e?.message ?? e ?? "FATAL"),
-    });
+/* =========================
+   Singleton + Start helper
+========================= */
+
+let singleton: InstagramBackfillWorker | null = null;
+
+export function getInstagramBackfillWorkerSingleton() {
+  if (singleton) return singleton;
+
+  singleton = new InstagramBackfillWorker(new RunInstagramBackfillUseCase(), {
+    maxParallelJobs: 1,
+    jobPollIntervalMs: 1500,
+    backfillConcurrency: 2,
+    alwaysRefetchLastDays: 7,
   });
 
-  return {
-    stop() {
-      stopped = true;
-    },
-  };
+  singleton.start();
+  return singleton;
+}
+
+export function startInstagramBackfillWorker(opts?: {
+  concurrency?: number;
+  pollMs?: number;
+  maxParallelJobs?: number;
+  alwaysRefetchLastDays?: number;
+
+  // compat antigos
+  maxPosts?: number;
+  maxPages?: number;
+  perPostDelayMs?: number;
+  perPageDelayMs?: number;
+}) {
+  if (!singleton) {
+    singleton = new InstagramBackfillWorker(new RunInstagramBackfillUseCase(), {
+      maxParallelJobs: Math.max(1, Number(opts?.maxParallelJobs ?? 1) || 1),
+      jobPollIntervalMs: Math.max(100, Number(opts?.pollMs ?? 1500) || 1500),
+      backfillConcurrency: Math.max(1, Number(opts?.concurrency ?? 2) || 2),
+      alwaysRefetchLastDays: Math.max(
+        0,
+        Number(opts?.alwaysRefetchLastDays ?? 7) || 7
+      ),
+    });
+  }
+
+  singleton.start();
+  return singleton;
 }

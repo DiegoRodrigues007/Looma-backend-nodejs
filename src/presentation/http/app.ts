@@ -1,3 +1,4 @@
+// src/presentation/http/app.ts
 import express, { NextFunction, Request, Response } from "express";
 import cookieParser from "cookie-parser";
 import axios from "axios";
@@ -10,7 +11,11 @@ import { instagramRouter } from "./routes/instagram.routes";
 import { youtubeRouter } from "./routes/youtube.routes";
 import metricsRoutes from "./routes/metrics.routes";
 
+// ✅ backfill router (já estava)
 import instagramBackfillRoutes from "./routes/instagramBackfill.routes";
+
+// ✅ NOVO: posts sync router (era isso que causava 404)
+import instagramPostsRoutes from "./routes/instagramPosts.routes";
 
 import { authMiddleware } from "./middlewares/authMiddleware";
 
@@ -33,18 +38,35 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
 });
 
+/* =========================
+   Routes
+========================= */
+
 app.use("/api/auth", authRouter);
 
+// ✅ Instagram (base)
 app.use("/api/instagram", instagramRouter);
 
+// ✅ Instagram Backfill
 app.use("/api/instagram", instagramBackfillRoutes);
 
+// ✅ Instagram Posts (sync etc.)  <--- FIX do 404
+app.use("/api/instagram", instagramPostsRoutes);
+
+// ✅ YouTube
 app.use("/api/youtube", youtubeRouter);
 
+// ✅ Metrics (protegido)
 app.use("/api/metrics", authMiddleware, metricsRoutes);
 
+/* =========================
+   Swagger
+========================= */
 setupSwagger(app);
 
+/* =========================
+   404 handler
+========================= */
 app.use((req, res) => {
   res.status(404).json({
     message: "Rota não encontrada",
@@ -53,6 +75,9 @@ app.use((req, res) => {
   });
 });
 
+/* =========================
+   Error handler
+========================= */
 app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
   const status = Number(err?.statusCode || err?.status || 500);
 

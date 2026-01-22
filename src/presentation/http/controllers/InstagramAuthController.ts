@@ -20,6 +20,8 @@ import {
   type InstagramTimeseriesPoint,
 } from "../../../domain/metrics/windows/metricsWindows";
 
+const ENABLE_INPROCESS_BACKFILL = String(process.env.ENABLE_INPROCESS_BACKFILL ?? "").toLowerCase() === "true";
+const INPROCESS_BACKFILL_CONCURRENCY = Math.max(1, Number(process.env.INPROCESS_BACKFILL_CONCURRENCY ?? 2) || 2);
 
 function s(v: any): string {
   return String(v ?? "").trim();
@@ -209,6 +211,73 @@ function isRowAllZero(r: any): boolean {
   return reach === 0 && pv === 0 && ti === 0;
 }
 
+async function runPromisePool<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>
+) {
+  const queue = items.slice();
+  const runners = new Array(Math.min(concurrency, queue.length)).fill(null).map(async () => {
+    while (queue.length) {
+      const item = queue.shift();
+      if (!item) break;
+      await worker(item);
+    }
+  });
+  await Promise.allSettled(runners);
+}
+
+function triggerInProcessBackfill(params: {
+  userId: string;
+  instagramAccountId: string;
+  igUserId: string;
+  pageAccessToken: string;
+  daysToFetch: string[];
+  refillZeros: boolean;
+}) {
+  if (!ENABLE_INPROCESS_BACKFILL) return;
+
+  setImmediate(async () => {
+    const { userId, instagramAccountId, igUserId, pageAccessToken, daysToFetch } = params;
+
+    await runPromisePool(daysToFetch, INPROCESS_BACKFILL_CONCURRENCY, async (dayYmd) => {
+      try {
+        const g = await fetchDailyInsightsFromGraph({
+          igUserId,
+          pageAccessToken,
+          dayYmd,
+        });
+
+        await prisma.instagramAccountDailyMetrics.upsert({
+          where: {
+            instagramAccountId_day: {
+              instagramAccountId,
+              day: dateOnlyUtcFromYmd(dayYmd),
+            },
+          },
+          create: {
+            userId,
+            instagramAccountId,
+            day: dateOnlyUtcFromYmd(dayYmd),
+            followers: toFiniteNumber(g.followers),
+            profileViewsTotal: toFiniteNumber(g.profileViews),
+            reach: toFiniteNumber(g.reach),
+            totalInteractions: toFiniteNumber(g.totalInteractions),
+          },
+          update: {
+            followers: toFiniteNumber(g.followers),
+            profileViewsTotal: toFiniteNumber(g.profileViews),
+            reach: toFiniteNumber(g.reach),
+            totalInteractions: toFiniteNumber(g.totalInteractions),
+          },
+        });
+      } catch {
+        // aqui pode logar se quiser (mas não quebra o endpoint)
+      }
+    });
+  });
+}
+
 export class InstagramAuthController {
   constructor(
     private readonly authService: IInstagramIgLoginAuthService,
@@ -286,9 +355,7 @@ export class InstagramAuthController {
               source: s(c.source),
               instagramAccountId: null,
             }))
-            .filter(
-              (c) => c.igUserId && c.facebookPageId && c.pageAccessToken && c.source
-            );
+            .filter((c) => c.igUserId && c.facebookPageId && c.pageAccessToken && c.source);
 
           await prisma.instagramCandidate.deleteMany({
             where: { userId: s(userId), selectionId },
@@ -497,10 +564,7 @@ export class InstagramAuthController {
       return safeJson(res, 400, { ok: false, message: "instagramAccountId é obrigatório" });
     }
 
-    if (
-      this.setActiveAccount &&
-      typeof (this.setActiveAccount as any).execute === "function"
-    ) {
+    if (this.setActiveAccount && typeof (this.setActiveAccount as any).execute === "function") {
       const out = await (this.setActiveAccount as any).execute(s(userId), instagramAccountId);
       return safeJson(res, 200, { ok: true, ...out });
     }
@@ -590,12 +654,7 @@ export class InstagramAuthController {
 
     const pageAccessToken = s((account as any)?.pageAccessToken);
     const igUserId = s((account as any)?.igUserId);
-    if (!pageAccessToken || !igUserId) {
-      return safeJson(res, 400, {
-        ok: false,
-        message: "Conta IG sem pageAccessToken/igUserId. Refaça a conexão e confirme a conta.",
-      });
-    }
+    const hasGraphCreds = !!pageAccessToken && !!igUserId;
 
     const force = parseBool((req.query as any)?.force) ?? false;
     const refillZeros = parseBool((req.query as any)?.refillZeros) ?? true;
@@ -620,75 +679,19 @@ export class InstagramAuthController {
     const byDayExisting = new Map<string, any>();
     for (const r of existing) byDayExisting.set(ymd(r.day), r);
 
-    const daysToFetch = force
-      ? [...days]
-      : days.filter((d) => {
-          const r = byDayExisting.get(d);
-
-          if (!r) return true; 
-          if (lastDaysSet.has(d)) return true; 
-          if (!refillZeros) return false;
-          return isRowAllZero(r); 
-        });
-
-    const errors: Array<{ day: string; message: string }> = [];
-    let filledCount = 0;
-
-    for (const dayYmd of daysToFetch) {
-      try {
-        const g = await fetchDailyInsightsFromGraph({
-          igUserId,
-          pageAccessToken,
-          dayYmd,
-        });
-
-        await prisma.instagramAccountDailyMetrics.upsert({
-          where: {
-            instagramAccountId_day: {
-              instagramAccountId: account.id,
-              day: dateOnlyUtcFromYmd(dayYmd),
-            },
-          },
-          create: {
-            userId: s(userId),
-            instagramAccountId: account.id,
-            day: dateOnlyUtcFromYmd(dayYmd),
-            followers: toFiniteNumber(g.followers),
-            profileViewsTotal: toFiniteNumber(g.profileViews),
-            reach: toFiniteNumber(g.reach),
-            totalInteractions: toFiniteNumber(g.totalInteractions),
-          },
-          update: {
-            followers: toFiniteNumber(g.followers),
-            profileViewsTotal: toFiniteNumber(g.profileViews),
-            reach: toFiniteNumber(g.reach),
-            totalInteractions: toFiniteNumber(g.totalInteractions),
-          },
-        });
-
-        filledCount++;
-      } catch (e: any) {
-        errors.push({ day: dayYmd, message: String(e?.message ?? "erro") });
-      }
-    }
-
-    const rows = await prisma.instagramAccountDailyMetrics.findMany({
-      where: {
-        userId: s(userId),
-        instagramAccountId: account.id,
-        day: {
-          gte: dateOnlyUtcFromYmd(safeFrom),
-          lte: dateOnlyUtcFromYmd(safeTo),
-        },
-      },
-      orderBy: { day: "asc" },
+    const missingDays = days.filter((d) => !byDayExisting.get(d));
+    const zeroDays = days.filter((d) => {
+      const r = byDayExisting.get(d);
+      if (!r) return false;
+      if (!refillZeros) return false;
+      if (lastDaysSet.has(d)) return true; 
+      return isRowAllZero(r);
     });
 
-    const byDay: Record<string, any> = {};
-    for (const r of rows) byDay[ymd(r.day)] = r;
+    const suggestedFetchDays = force ? [...days] : Array.from(new Set([...missingDays, ...zeroDays]));
 
     const timeseries: InstagramTimeseriesPoint[] = days.map((day) => {
-      const r = byDay[day];
+      const r = byDayExisting.get(day);
       const followers = toFiniteNumber(r?.followers);
       const reach = toFiniteNumber(r?.reach);
       const profileViews = toFiniteNumber(r?.profileViewsTotal);
@@ -731,6 +734,20 @@ export class InstagramAuthController {
 
     const summary = buildWindowsSummary(timeseries);
 
+    const shouldAutoBackfill =
+      parseBool((req.query as any)?.autoBackfill) ?? false; 
+
+    if (shouldAutoBackfill && hasGraphCreds && suggestedFetchDays.length > 0) {
+      triggerInProcessBackfill({
+        userId: s(userId),
+        instagramAccountId: account.id,
+        igUserId,
+        pageAccessToken,
+        daysToFetch: suggestedFetchDays,
+        refillZeros,
+      });
+    }
+
     return safeJson(res, 200, {
       ok: true,
       activeInstagramAccountId: user?.activeInstagramAccountId ?? null,
@@ -746,17 +763,23 @@ export class InstagramAuthController {
       summary,
       meta: {
         source: "instagram_account_daily_metrics",
-        generatedBy: filledCount > 0 ? "graph_on_demand_backfill" : "database",
-        requestedFetchDays: daysToFetch.length,
-        filledDays: filledCount,
-        errorsCount: errors.length,
-        errorsPreview: errors.slice(0, 10),
+        generatedBy: "database",
+        hasGraphCreds,
         allZero,
-        hint: allZero ? "Tudo zerado." : "OK",
+        hint: allZero ? "Tudo zerado (provável falta de histórico no banco)." : "OK",
+
+        missingDaysCount: missingDays.length,
+        zeroDaysCount: zeroDays.length,
+        suggestedFetchDaysCount: suggestedFetchDays.length,
+        suggestedFetchDaysPreview: suggestedFetchDays.slice(0, 10),
+
         params: {
           force,
           refillZeros,
           alwaysRefetchLastDays: ALWAYS_REFETCH_LAST_DAYS,
+          autoBackfill: shouldAutoBackfill,
+          enableInprocessBackfill: ENABLE_INPROCESS_BACKFILL,
+          inprocessConcurrency: INPROCESS_BACKFILL_CONCURRENCY,
         },
       },
     });

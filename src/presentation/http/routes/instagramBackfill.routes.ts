@@ -20,9 +20,9 @@ function getUserId(req: any): string | null {
 
 /**
  * Resolve a conta que o backfill vai usar:
- * 1) body.instagramAccountId (se veio)
- * 2) user.activeInstagramAccountId
- * 3) conta conectada mais recente
+ * 1) requestedId (body/query) -> valida se pertence ao user e está conectada
+ * 2) user.activeInstagramAccountId -> valida se está conectada
+ * 3) conta conectada mais recente (updatedAt desc)
  */
 async function resolveInstagramAccountId(opts: {
   userId: string;
@@ -76,6 +76,120 @@ async function resolveInstagramAccountId(opts: {
 }
 
 /**
+ * ===========================
+ * Swagger/OpenAPI Schemas
+ * ===========================
+ *
+ * ⚠️ IMPORTANTE:
+ * - O Swagger só mostra “Parameters / Request body” se você declarar aqui.
+ * - Mesmo que sejam opcionais no backend, documentar ajuda muito no "Try it out".
+ */
+
+/**
+ * @openapi
+ * components:
+ *   schemas:
+ *     InstagramBackfillStartRequest:
+ *       type: object
+ *       additionalProperties: false
+ *       properties:
+ *         instagramAccountId:
+ *           type: string
+ *           description: >
+ *             (Opcional) ID da conta Instagram conectada (instagramAccount.id).
+ *             Se não enviar, o backend tenta usar a conta ativa do usuário
+ *             (user.activeInstagramAccountId) ou a conta conectada mais recente.
+ *         maxPosts:
+ *           type: integer
+ *           minimum: 1
+ *           maximum: 5000
+ *           description: >
+ *             (Opcional) Limite de posts para backfill (útil para teste).
+ *             Só terá efeito se o worker/implementação usar esse campo.
+ *       example:
+ *         instagramAccountId: "b3b3b3b3-1111-2222-3333-aaaaaaaaaaaa"
+ *         maxPosts: 100
+ *
+ *     InstagramBackfillStartResponse:
+ *       type: object
+ *       additionalProperties: false
+ *       properties:
+ *         ok:
+ *           type: boolean
+ *         jobId:
+ *           type: string
+ *         status:
+ *           type: string
+ *           enum: [queued, running, done, failed, cancelled]
+ *         importedCount:
+ *           type: integer
+ *           nullable: true
+ *         processedCount:
+ *           type: integer
+ *           nullable: true
+ *         instagramAccountId:
+ *           type: string
+ *       required: [ok, jobId, status, instagramAccountId]
+ *       example:
+ *         ok: true
+ *         jobId: "c0c0c0c0-1111-2222-3333-bbbbbbbbbbbb"
+ *         status: "queued"
+ *         importedCount: 0
+ *         processedCount: 0
+ *         instagramAccountId: "b3b3b3b3-1111-2222-3333-aaaaaaaaaaaa"
+ *
+ *     InstagramBackfillStatusResponse:
+ *       type: object
+ *       additionalProperties: false
+ *       properties:
+ *         ok:
+ *           type: boolean
+ *         status:
+ *           type: string
+ *           description: >
+ *             Estado do job. "none" quando não existe job para a conta resolvida.
+ *           enum: [none, queued, running, done, failed, cancelled]
+ *         jobId:
+ *           type: string
+ *           nullable: true
+ *         importedCount:
+ *           type: integer
+ *           nullable: true
+ *         processedCount:
+ *           type: integer
+ *           nullable: true
+ *         cursor:
+ *           type: string
+ *           nullable: true
+ *         startedAt:
+ *           type: string
+ *           format: date-time
+ *           nullable: true
+ *         finishedAt:
+ *           type: string
+ *           format: date-time
+ *           nullable: true
+ *         lastError:
+ *           type: string
+ *           nullable: true
+ *         instagramAccountId:
+ *           type: string
+ *           nullable: true
+ *       required: [ok, status]
+ *       example:
+ *         ok: true
+ *         status: "running"
+ *         jobId: "c0c0c0c0-1111-2222-3333-bbbbbbbbbbbb"
+ *         importedCount: 120
+ *         processedCount: 75
+ *         cursor: "after=XYZ"
+ *         startedAt: "2026-01-22T12:00:00.000Z"
+ *         finishedAt: null
+ *         lastError: null
+ *         instagramAccountId: "b3b3b3b3-1111-2222-3333-aaaaaaaaaaaa"
+ */
+
+/**
  * @openapi
  * /api/instagram/backfill/start:
  *   post:
@@ -90,14 +204,60 @@ async function resolveInstagramAccountId(opts: {
  *       ⚠️ O processamento ocorre de forma assíncrona (worker).
  *     security:
  *       - bearerAuth: []
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/InstagramBackfillStartRequest'
+ *     responses:
+ *       200:
+ *         description: Job criado (ou job ativo reaproveitado)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/InstagramBackfillStartResponse'
+ *       400:
+ *         description: Nenhuma conta Instagram conectada encontrada (ou instagramAccountId inválido)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               additionalProperties: false
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 error: { type: string }
+ *               required: [ok, error]
+ *             example:
+ *               ok: false
+ *               error: "Nenhuma conta Instagram conectada encontrada (ou instagramAccountId inválido)."
+ *       401:
+ *         description: Não autorizado (token ausente/inválido)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               additionalProperties: false
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 error: { type: string }
+ *               required: [ok, error]
+ *             example:
+ *               ok: false
+ *               error: "Não autorizado"
  */
 router.post("/backfill/start", authMiddleware, async (req, res) => {
   const userId = getUserId(req);
-  if (!userId) return res.status(401).json({ ok: false, error: "Não autorizado" });
+  if (!userId) {
+    return res.status(401).json({ ok: false, error: "Não autorizado" });
+  }
 
-  const requestedAccountId = String(req.body?.instagramAccountId ?? "").trim() || undefined;
+  const requestedAccountId =
+    String(req.body?.instagramAccountId ?? "").trim() || undefined;
 
-  // ✅ resolve conta (obrigatória no schema)
+  // (Opcional) maxPosts — só salva se seu schema tiver esse campo.
+  // const maxPosts = Number(req.body?.maxPosts) || null;
+
   const instagramAccountId = await resolveInstagramAccountId({
     userId,
     requestedId: requestedAccountId,
@@ -111,7 +271,6 @@ router.post("/backfill/start", authMiddleware, async (req, res) => {
     });
   }
 
-  // ✅ evita duplicar job ativo (agora sempre por conta)
   const existing = await prisma.instagramBackfillJob.findFirst({
     where: {
       userId,
@@ -135,10 +294,10 @@ router.post("/backfill/start", authMiddleware, async (req, res) => {
   const job = await prisma.instagramBackfillJob.create({
     data: {
       userId,
-      instagramAccountId, // ✅ obrigatório
+      instagramAccountId,
       status: "queued",
-      // opcional: maxPosts pra teste (se você usa no worker, pode salvar num campo próprio)
-      // maxPosts: Number(req.body?.maxPosts) || null,
+      // se existir no schema:
+      // maxPosts,
     },
   });
 
@@ -146,6 +305,8 @@ router.post("/backfill/start", authMiddleware, async (req, res) => {
     ok: true,
     jobId: job.id,
     status: job.status,
+    importedCount: job.importedCount,
+    processedCount: job.processedCount,
     instagramAccountId: job.instagramAccountId,
   });
 });
@@ -158,25 +319,62 @@ router.post("/backfill/start", authMiddleware, async (req, res) => {
  *       - Instagram Backfill
  *     summary: Consultar status do backfill do Instagram
  *     description: >
- *       Retorna o status do job de backfill mais recente,
+ *       Retorna o status do job de backfill mais recente para a conta resolvida,
  *       incluindo progresso, erros e timestamps.
+ *
+ *       Regras para resolver conta:
+ *       1) query.instagramAccountId (se veio)
+ *       2) user.activeInstagramAccountId
+ *       3) conta conectada mais recente
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: instagramAccountId
+ *         required: false
+ *         schema:
+ *           type: string
+ *         description: >
+ *           (Opcional) ID da conta Instagram conectada. Se não enviar, o backend
+ *           usa a conta ativa do usuário ou a conta conectada mais recente.
+ *     responses:
+ *       200:
+ *         description: Status do job (ou "none" se não existir)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/InstagramBackfillStatusResponse'
+ *       401:
+ *         description: Não autorizado (token ausente/inválido)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               additionalProperties: false
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 error: { type: string }
+ *               required: [ok, error]
+ *             example:
+ *               ok: false
+ *               error: "Não autorizado"
  */
 router.get("/backfill/status", authMiddleware, async (req, res) => {
   const userId = getUserId(req);
-  if (!userId) return res.status(401).json({ ok: false, error: "Não autorizado" });
+  if (!userId) {
+    return res.status(401).json({ ok: false, error: "Não autorizado" });
+  }
 
-  const requestedAccountId = String(req.query?.instagramAccountId ?? "").trim() || undefined;
+  const requestedAccountId =
+    String(req.query?.instagramAccountId ?? "").trim() || undefined;
 
-  // ✅ se vier query, valida; se não vier, tenta resolver igual ao start
   const instagramAccountId = await resolveInstagramAccountId({
     userId,
     requestedId: requestedAccountId,
   });
 
   if (!instagramAccountId) {
-    return res.json({ ok: true, status: "none" });
+    return res.json({ ok: true, status: "none", instagramAccountId: null });
   }
 
   const job = await prisma.instagramBackfillJob.findFirst({
