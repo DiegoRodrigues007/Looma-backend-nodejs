@@ -2,8 +2,6 @@
 import { Router } from "express";
 import { makeInstagramAuthController } from "../../composition/instagramComposition";
 import { authMiddleware } from "../middlewares/authMiddleware";
-
-// ✅ DB
 import { prisma } from "../../../infrastructure/db/prismaClient";
 
 export const instagramRouter = Router();
@@ -31,9 +29,9 @@ function parseYmdToUtcEnd(v: string): Date {
 
 function getUserIdFromReq(req: any): string | null {
   const v =
-    req?.user?.sub ||
+    req?.user?.userId || // ✅ primeiro
     req?.user?.id ||
-    req?.user?.userId ||
+    req?.user?.sub ||
     req?.userId ||
     null;
 
@@ -41,6 +39,162 @@ function getUserIdFromReq(req: any): string | null {
   if (typeof v === "number") return String(v);
   return null;
 }
+
+
+/**
+ * =========================
+ * OPENAPI COMPONENTS
+ * =========================
+ *
+ * @openapi
+ * components:
+ *   securitySchemes:
+ *     bearerAuth:
+ *       type: http
+ *       scheme: bearer
+ *       bearerFormat: JWT
+ *   schemas:
+ *     InstagramAccount:
+ *       type: object
+ *       properties:
+ *         id:
+ *           type: string
+ *         igUserId:
+ *           type: string
+ *         username:
+ *           type: string
+ *           nullable: true
+ *         accountType:
+ *           type: string
+ *           nullable: true
+ *         facebookPageId:
+ *           type: string
+ *           nullable: true
+ *         expiresAt:
+ *           type: string
+ *           format: date-time
+ *           nullable: true
+ *         isConnected:
+ *           type: boolean
+ *         updatedAt:
+ *           type: string
+ *           format: date-time
+ *       required:
+ *         - id
+ *         - igUserId
+ *         - isConnected
+ *         - updatedAt
+ *
+ *     InstagramActiveResponse:
+ *       type: object
+ *       properties:
+ *         ok:
+ *           type: boolean
+ *         activeInstagramAccountId:
+ *           type: string
+ *           nullable: true
+ *         account:
+ *           $ref: '#/components/schemas/InstagramAccount'
+ *           nullable: true
+ *       required:
+ *         - ok
+ *         - activeInstagramAccountId
+ *         - account
+ *
+ *     InstagramAccountsResponse:
+ *       type: object
+ *       properties:
+ *         ok:
+ *           type: boolean
+ *         activeInstagramAccountId:
+ *           type: string
+ *           nullable: true
+ *         total:
+ *           type: integer
+ *         accounts:
+ *           type: array
+ *           items:
+ *             allOf:
+ *               - $ref: '#/components/schemas/InstagramAccount'
+ *               - type: object
+ *                 properties:
+ *                   isActive:
+ *                     type: boolean
+ *       required:
+ *         - ok
+ *         - activeInstagramAccountId
+ *         - total
+ *         - accounts
+ *
+ *     InstagramSetActiveRequest:
+ *       type: object
+ *       required:
+ *         - instagramAccountId
+ *       properties:
+ *         instagramAccountId:
+ *           type: string
+ *
+ *     ErrorResponse:
+ *       type: object
+ *       properties:
+ *         ok:
+ *           type: boolean
+ *         message:
+ *           type: string
+ *       required:
+ *         - ok
+ *         - message
+ *
+ *     InstagramConfirmRequest:
+ *       type: object
+ *       description: >
+ *         Payload flexível. O frontend pode mandar selections: [{ igUserId, facebookPageId }].
+ *         O backend adapta para igUserIds[] quando necessário.
+ *       properties:
+ *         igUserIds:
+ *           type: array
+ *           items:
+ *             type: string
+ *         candidateIds:
+ *           type: array
+ *           items:
+ *             type: string
+ *         selections:
+ *           type: array
+ *           items:
+ *             type: object
+ *             properties:
+ *               igUserId:
+ *                 type: string
+ *               facebookPageId:
+ *                 type: string
+ *             required:
+ *               - igUserId
+ *
+ *     InstagramPostsResponse:
+ *       type: object
+ *       properties:
+ *         ok:
+ *           type: boolean
+ *         source:
+ *           type: string
+ *           example: database
+ *         activeInstagramAccountId:
+ *           type: string
+ *           nullable: true
+ *         total:
+ *           type: integer
+ *         posts:
+ *           type: array
+ *           items:
+ *             type: object
+ *       required:
+ *         - ok
+ *         - source
+ *         - activeInstagramAccountId
+ *         - total
+ *         - posts
+ */
 
 /**
  * =========================
@@ -70,8 +224,16 @@ function getUserIdFromReq(req: any): string | null {
  *         description: Fluxo iniciado.
  *       401:
  *         description: Não autenticado.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  *       501:
  *         description: Controller.start não implementado.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  */
 instagramRouter.get("/start", authMiddleware, async (req, res) => {
   const redirect = parseBool(req.query.redirect);
@@ -103,6 +265,10 @@ instagramRouter.get("/start", authMiddleware, async (req, res) => {
  *         description: Dados inválidos ou ausência de parâmetros necessários.
  *       501:
  *         description: Controller.callback não implementado.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  */
 instagramRouter.get("/callback", async (req, res) => {
   if (typeof controller.callback !== "function") {
@@ -128,8 +294,16 @@ instagramRouter.get("/callback", async (req, res) => {
  *         description: Retorna status/estado atual do vínculo.
  *       401:
  *         description: Não autenticado.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  *       501:
  *         description: Controller.status não implementado.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  */
 instagramRouter.get("/status", authMiddleware, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
@@ -156,13 +330,24 @@ instagramRouter.get("/status", authMiddleware, async (req, res) => {
  *     tags:
  *       - Instagram
  *     summary: Obtém a conta Instagram ativa do usuário.
+ *     description: >
+ *       Se não houver conta ativa definida, tenta selecionar automaticamente a última atualizada
+ *       (isConnected=true). **Não filtra por token** para evitar accountsLen=0 no Topbar.
  *     security:
  *       - bearerAuth: []
  *     responses:
  *       200:
  *         description: Conta ativa (ou null se não houver).
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/InstagramActiveResponse'
  *       401:
  *         description: Não autenticado.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  */
 instagramRouter.get("/active", authMiddleware, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
@@ -179,8 +364,53 @@ instagramRouter.get("/active", authMiddleware, async (req, res) => {
     },
   });
 
+  // ✅ AJUSTE CRÍTICO: removido filtro de token
   if (!user?.activeInstagramAccountId) {
-    return res.json({ ok: true, activeInstagramAccountId: null, account: null });
+    const first = await prisma.instagramAccount.findFirst({
+      where: {
+        userId: String(userId),
+        isConnected: true,
+      },
+      orderBy: { updatedAt: "desc" },
+      select: {
+        id: true,
+        igUserId: true,
+        username: true,
+        accountType: true,
+        facebookPageId: true,
+        expiresAt: true,
+        updatedAt: true,
+        isConnected: true,
+      },
+    });
+
+    if (!first) {
+      return res.json({ ok: true, activeInstagramAccountId: null, account: null });
+    }
+
+    try {
+      await prisma.user.update({
+        where: { id: String(userId) },
+        data: { activeInstagramAccountId: first.id },
+      });
+    } catch {
+      // silencioso
+    }
+
+    return res.json({
+      ok: true,
+      activeInstagramAccountId: first.id,
+      account: {
+        id: first.id,
+        igUserId: first.igUserId,
+        username: first.username ?? null,
+        accountType: first.accountType ?? null,
+        facebookPageId: first.facebookPageId ?? null,
+        expiresAt: first.expiresAt ?? null,
+        isConnected: first.isConnected,
+        updatedAt: first.updatedAt,
+      },
+    });
   }
 
   const acc = await prisma.instagramAccount.findFirst({
@@ -188,7 +418,6 @@ instagramRouter.get("/active", authMiddleware, async (req, res) => {
       id: user.activeInstagramAccountId,
       userId: String(userId),
       isConnected: true,
-      OR: [{ pageAccessToken: { not: null } }, { accessToken: { not: null } }],
     },
     select: {
       id: true,
@@ -202,21 +431,67 @@ instagramRouter.get("/active", authMiddleware, async (req, res) => {
     },
   });
 
+  if (!acc) {
+    const fallback = await prisma.instagramAccount.findFirst({
+      where: {
+        userId: String(userId),
+        isConnected: true,
+      },
+      orderBy: { updatedAt: "desc" },
+      select: {
+        id: true,
+        igUserId: true,
+        username: true,
+        accountType: true,
+        facebookPageId: true,
+        expiresAt: true,
+        updatedAt: true,
+        isConnected: true,
+      },
+    });
+
+    if (!fallback) {
+      return res.json({ ok: true, activeInstagramAccountId: null, account: null });
+    }
+
+    try {
+      await prisma.user.update({
+        where: { id: String(userId) },
+        data: { activeInstagramAccountId: fallback.id },
+      });
+    } catch {
+      // silencioso
+    }
+
+    return res.json({
+      ok: true,
+      activeInstagramAccountId: fallback.id,
+      account: {
+        id: fallback.id,
+        igUserId: fallback.igUserId,
+        username: fallback.username ?? null,
+        accountType: fallback.accountType ?? null,
+        facebookPageId: fallback.facebookPageId ?? null,
+        expiresAt: fallback.expiresAt ?? null,
+        isConnected: fallback.isConnected,
+        updatedAt: fallback.updatedAt,
+      },
+    });
+  }
+
   return res.json({
     ok: true,
-    activeInstagramAccountId: acc?.id ?? user.activeInstagramAccountId,
-    account: acc
-      ? {
-          id: acc.id,
-          igUserId: acc.igUserId,
-          username: acc.username ?? null,
-          accountType: acc.accountType ?? null,
-          facebookPageId: acc.facebookPageId ?? null,
-          expiresAt: acc.expiresAt ?? null,
-          isConnected: acc.isConnected,
-          updatedAt: acc.updatedAt,
-        }
-      : null,
+    activeInstagramAccountId: acc.id,
+    account: {
+      id: acc.id,
+      igUserId: acc.igUserId,
+      username: acc.username ?? null,
+      accountType: acc.accountType ?? null,
+      facebookPageId: acc.facebookPageId ?? null,
+      expiresAt: acc.expiresAt ?? null,
+      isConnected: acc.isConnected,
+      updatedAt: acc.updatedAt,
+    },
   });
 });
 
@@ -227,6 +502,9 @@ instagramRouter.get("/active", authMiddleware, async (req, res) => {
  *     tags:
  *       - Instagram
  *     summary: Define a conta Instagram ativa do usuário.
+ *     description: >
+ *       Define a conta ativa a partir do instagramAccountId. Se existir controller.setActive, delega para ele.
+ *       Caso contrário, usa fallback no prisma (isConnected=true).
  *     security:
  *       - bearerAuth: []
  *     requestBody:
@@ -234,22 +512,32 @@ instagramRouter.get("/active", authMiddleware, async (req, res) => {
  *       content:
  *         application/json:
  *           schema:
- *             type: object
- *             required:
- *               - instagramAccountId
- *             properties:
- *               instagramAccountId:
- *                 type: string
- *                 description: ID da InstagramAccount no banco.
+ *             $ref: '#/components/schemas/InstagramSetActiveRequest'
  *     responses:
  *       200:
  *         description: Conta ativa definida com sucesso.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/InstagramActiveResponse'
  *       400:
  *         description: instagramAccountId ausente.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  *       401:
  *         description: Não autenticado.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  *       404:
  *         description: Conta não encontrada ou não conectada para este usuário.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  */
 instagramRouter.post("/active", authMiddleware, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
@@ -265,18 +553,16 @@ instagramRouter.post("/active", authMiddleware, async (req, res) => {
       .json({ ok: false, message: "instagramAccountId é obrigatório" });
   }
 
-  // ✅ se existir controller.setActive, usa ele (regra centralizada)
   if (typeof controller.setActive === "function") {
     return controller.setActive(req, res);
   }
 
-  // fallback
+  // ✅ AJUSTE CRÍTICO: removido filtro de token
   const exists = await prisma.instagramAccount.findFirst({
     where: {
       id: instagramAccountId,
       userId: String(userId),
       isConnected: true,
-      OR: [{ pageAccessToken: { not: null } }, { accessToken: { not: null } }],
     },
     select: {
       id: true,
@@ -285,6 +571,8 @@ instagramRouter.post("/active", authMiddleware, async (req, res) => {
       accountType: true,
       facebookPageId: true,
       updatedAt: true,
+      expiresAt: true,
+      isConnected: true,
     },
   });
 
@@ -310,6 +598,8 @@ instagramRouter.post("/active", authMiddleware, async (req, res) => {
       username: exists.username ?? null,
       accountType: exists.accountType ?? null,
       facebookPageId: exists.facebookPageId ?? null,
+      expiresAt: exists.expiresAt ?? null,
+      isConnected: exists.isConnected,
       updatedAt: exists.updatedAt,
     },
   });
@@ -322,18 +612,28 @@ instagramRouter.post("/active", authMiddleware, async (req, res) => {
  *     tags:
  *       - Instagram
  *     summary: Lista contas Instagram conectadas do usuário (multi-conta).
+ *     description: >
+ *       Retorna accounts + activeInstagramAccountId. Se não houver conta ativa válida, define a primeira automaticamente.
+ *       **Não filtra por token** para evitar retornar lista vazia no Topbar.
  *     security:
  *       - bearerAuth: []
  *     responses:
  *       200:
  *         description: Lista de contas conectadas e conta ativa.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/InstagramAccountsResponse'
  *       401:
  *         description: Não autenticado.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  */
 instagramRouter.get("/accounts", authMiddleware, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
 
-  // ✅ prioridade: controller.accounts (usecase)
   if (typeof controller.accounts === "function") {
     return controller.accounts(req, res);
   }
@@ -348,11 +648,11 @@ instagramRouter.get("/accounts", authMiddleware, async (req, res) => {
     select: { activeInstagramAccountId: true },
   });
 
+  // ✅ AJUSTE CRÍTICO: removido filtro de token
   const rows = await prisma.instagramAccount.findMany({
     where: {
       userId: String(userId),
       isConnected: true,
-      OR: [{ pageAccessToken: { not: null } }, { accessToken: { not: null } }],
     },
     orderBy: { updatedAt: "desc" },
     select: {
@@ -368,7 +668,6 @@ instagramRouter.get("/accounts", authMiddleware, async (req, res) => {
     take: 50,
   });
 
-  // ✅ se não existir ativa e tiver contas, define a primeira como ativa
   let activeId = user?.activeInstagramAccountId ?? null;
   const activeExists = activeId ? rows.some((r) => r.id === activeId) : false;
 
@@ -419,8 +718,16 @@ instagramRouter.get("/accounts", authMiddleware, async (req, res) => {
  *         description: Lista de candidatos.
  *       401:
  *         description: Não autenticado.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  *       501:
  *         description: Controller.candidates não implementado.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  */
 const candidatesHandler = async (req: any, res: any) => {
   res.setHeader("Cache-Control", "no-store");
@@ -443,15 +750,18 @@ instagramRouter.get("/candidates", authMiddleware, candidatesHandler);
  *     tags:
  *       - Instagram
  *     summary: Confirma o vínculo de uma conta/candidato e finaliza a conexão.
+ *     description: >
+ *       O frontend pode mandar { selections: [{ igUserId, facebookPageId }] }.
+ *       O backend adapta para igUserIds[] quando necessário e delega para controller.confirm.
+ *       Após confirmar, se não houver activeInstagramAccountId definido, seta a última conectada.
  *     security:
  *       - bearerAuth: []
  *     requestBody:
- *       required: true
+ *       required: false
  *       content:
  *         application/json:
  *           schema:
- *             type: object
- *             description: Payload depende do seu controller/usecase (ex.: candidateId, igUserId, pageId, etc).
+ *             $ref: '#/components/schemas/InstagramConfirmRequest'
  *     responses:
  *       200:
  *         description: Conta confirmada/conectada.
@@ -459,11 +769,40 @@ instagramRouter.get("/candidates", authMiddleware, candidatesHandler);
  *         description: Payload inválido.
  *       401:
  *         description: Não autenticado.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  *       501:
  *         description: Controller.confirm não implementado.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  */
 instagramRouter.post("/confirm", authMiddleware, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
+
+  try {
+    const body: any = req.body ?? {};
+    const hasIgUserIds =
+      Array.isArray(body?.igUserIds) && body.igUserIds.length > 0;
+    const hasCandidateIds =
+      Array.isArray(body?.candidateIds) && body.candidateIds.length > 0;
+
+    if (!hasIgUserIds && !hasCandidateIds && Array.isArray(body?.selections)) {
+      const igUserIds = body.selections
+        .map((x: any) => String(x?.igUserId ?? "").trim())
+        .filter((x: string) => x.length > 0);
+
+      if (igUserIds.length > 0) {
+        body.igUserIds = igUserIds;
+        req.body = body;
+      }
+    }
+  } catch {
+    // ignora
+  }
 
   if (typeof controller.confirm !== "function") {
     return res
@@ -473,7 +812,6 @@ instagramRouter.post("/confirm", authMiddleware, async (req, res) => {
 
   await controller.confirm(req, res);
 
-  // ✅ extra: se confirmou e não definiu ativa, define a última conectada
   try {
     const userId = getUserIdFromReq(req);
     if (userId) {
@@ -503,6 +841,12 @@ instagramRouter.post("/confirm", authMiddleware, async (req, res) => {
 });
 
 /**
+ * =========================
+ * DISCONNECT
+ * =========================
+ */
+
+/**
  * @openapi
  * /api/instagram/disconnect:
  *   post:
@@ -517,14 +861,25 @@ instagramRouter.post("/confirm", authMiddleware, async (req, res) => {
  *         application/json:
  *           schema:
  *             type: object
- *             description: Payload opcional depende do controller (ex.: instagramAccountId).
+ *             properties:
+ *               instagramAccountId:
+ *                 type: string
+ *                 description: Opcional. Se seu controller suportar, desconecta uma conta específica.
  *     responses:
  *       204:
  *         description: Desconectado com sucesso (sem conteúdo).
  *       401:
  *         description: Não autenticado.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  *       501:
  *         description: Controller.disconnect não implementado.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  */
 instagramRouter.post("/disconnect", authMiddleware, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
@@ -541,7 +896,7 @@ instagramRouter.post("/disconnect", authMiddleware, async (req, res) => {
 
 /**
  * =========================
- * DASHBOARD DATA
+ * DASHBOARD METRICS
  * =========================
  */
 
@@ -574,8 +929,16 @@ instagramRouter.post("/disconnect", authMiddleware, async (req, res) => {
  *         description: Métricas retornadas com sucesso.
  *       401:
  *         description: Não autenticado.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  *       501:
  *         description: Controller.metrics não implementado.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  */
 instagramRouter.get("/metrics", authMiddleware, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
@@ -590,7 +953,9 @@ instagramRouter.get("/metrics", authMiddleware, async (req, res) => {
 });
 
 /**
+ * =========================
  * POSTS (DB-first)
+ * =========================
  */
 
 /**
@@ -600,6 +965,8 @@ instagramRouter.get("/metrics", authMiddleware, async (req, res) => {
  *     tags:
  *       - Instagram
  *     summary: Lista posts do Instagram (DB-first), filtrando pela conta ativa.
+ *     description: >
+ *       Retorna posts do banco. Se houver conta ativa definida no usuário, filtra por instagramAccountId automaticamente.
  *     security:
  *       - bearerAuth: []
  *     parameters:
@@ -636,10 +1003,22 @@ instagramRouter.get("/metrics", authMiddleware, async (req, res) => {
  *     responses:
  *       200:
  *         description: Lista de posts retornada com sucesso.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/InstagramPostsResponse'
  *       401:
  *         description: Não autenticado.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  *       501:
  *         description: Model InstagramPost ainda não existe no Prisma.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
  */
 instagramRouter.get("/posts", authMiddleware, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
@@ -676,7 +1055,6 @@ instagramRouter.get("/posts", authMiddleware, async (req, res) => {
 
   const where: any = { userId: String(userId) };
 
-  // ✅ multi-conta: filtra por conta ativa automaticamente
   if (activeInstagramAccountId) {
     where.instagramAccountId = activeInstagramAccountId;
   }

@@ -8,6 +8,10 @@ import { GetCurrentUserUseCase } from "../../../application/use-cases/auth/GetCu
 
 import { prisma } from "../../../infrastructure/db/prismaClient";
 
+/* =========================
+   Helpers
+========================= */
+
 function pickEmailOrUserName(body: any): string | undefined {
   const raw =
     body?.emailOrUserName ??
@@ -22,7 +26,6 @@ function pickEmailOrUserName(body: any): string | undefined {
   if (!value) return undefined;
 
   if (value.includes("@")) return value.toLowerCase();
-
   return value;
 }
 
@@ -47,8 +50,24 @@ function getJwtSecret(): jwt.Secret {
 }
 
 function getJwtExpiresIn(): jwt.SignOptions["expiresIn"] {
+  // mantém compatível com seu .env atual
   const raw = process.env.JWT_EXPIRES_IN;
   return (raw as jwt.SignOptions["expiresIn"]) ?? "30m";
+}
+
+function getJwtIssuer(): string {
+  // use o MESMO issuer do authMiddleware/JwtTokenService
+  // ajuste o nome da env se no seu projeto for diferente
+  const v = process.env.JWT_ISSUER;
+  if (!v) throw new Error("JWT_ISSUER não configurado");
+  return v;
+}
+
+function getJwtAudience(): string {
+  // use o MESMO audience do authMiddleware/JwtTokenService
+  const v = process.env.JWT_AUDIENCE;
+  if (!v) throw new Error("JWT_AUDIENCE não configurado");
+  return v;
 }
 
 function refreshCookieOptions() {
@@ -57,10 +76,11 @@ function refreshCookieOptions() {
 
   return {
     httpOnly: true,
-    secure: isProd, 
+    secure: isProd,
     sameSite: "lax" as const,
+    // importante: manter consistente com seus endpoints
     path: "/api/auth/refresh",
-    maxAge: refreshDays * 24 * 60 * 60 * 1000, 
+    maxAge: refreshDays * 24 * 60 * 60 * 1000,
   };
 }
 
@@ -98,11 +118,14 @@ export class AuthController {
       return res.status(500).json({ message: "Login sem accessToken (erro interno)." });
     }
 
+    // ⚠️ decode não valida assinatura; mas aqui você só quer pegar o sub.
     const decoded = jwt.decode(accessToken) as jwt.JwtPayload | null;
-    const userId = decoded?.sub as string | undefined;
+    const userId = (decoded?.sub as string | undefined) ?? undefined;
 
     if (!userId) {
-      return res.status(500).json({ message: "Token sem sub (userId). Ajuste a geração do JWT." });
+      return res
+        .status(500)
+        .json({ message: "Token sem sub (userId). Ajuste a geração do JWT." });
     }
 
     const refreshToken = generateRefreshToken();
@@ -119,9 +142,11 @@ export class AuthController {
 
     res.cookie("refresh_token", refreshToken, refreshCookieOptions());
 
+    // ✅ Recomendo NÃO retornar refreshToken no body (só cookie),
+    // mas mantive sua estrutura pra não quebrar o front.
     return res.json({
       ...result.value,
-      refreshToken, 
+      refreshToken,
     });
   };
 
@@ -153,11 +178,23 @@ export class AuthController {
       return res.status(401).json({ message: "Refresh token inválido/expirado" });
     }
 
+    // ✅ busca o email para assinar o JWT no mesmo padrão do resto do sistema
+    const user = await prisma.user.findUnique({
+      where: { id: stored.userId },
+      select: { email: true },
+    });
+
+    if (!user?.email) {
+      return res.status(401).json({ message: "Usuário não encontrado" });
+    }
+
+    // revoga o refresh atual
     await prisma.refreshToken.updateMany({
       where: { tokenHash: rtHash },
       data: { revokedAt: new Date() },
     });
 
+    // emite novo refresh
     const newRefresh = generateRefreshToken();
     const newRefreshHash = hashToken(newRefresh);
     const newRefreshExpiresAt = new Date(Date.now() + getRefreshDays() * 24 * 60 * 60 * 1000);
@@ -172,15 +209,21 @@ export class AuthController {
 
     res.cookie("refresh_token", newRefresh, refreshCookieOptions());
 
+    // ✅ assina accessToken no padrão esperado pelo authMiddleware (issuer/audience/subject)
     const secret = getJwtSecret();
     const expiresIn = getJwtExpiresIn();
-
-    const signOptions: jwt.SignOptions = { expiresIn };
+    const issuer = getJwtIssuer();
+    const audience = getJwtAudience();
 
     const newAccessToken = jwt.sign(
-      { sub: stored.userId },
+      { email: user.email }, // payload consistente
       secret,
-      signOptions
+      {
+        expiresIn,
+        issuer,
+        audience,
+        subject: stored.userId, // sub vai aqui (padrão jwt)
+      }
     );
 
     const decodedAccess = jwt.decode(newAccessToken) as jwt.JwtPayload | null;
@@ -204,6 +247,7 @@ export class AuthController {
       });
     }
 
+    // precisa ser o mesmo path/options pra limpar
     res.clearCookie("refresh_token", refreshCookieOptions());
     return res.json({ ok: true });
   };

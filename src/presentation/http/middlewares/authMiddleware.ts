@@ -1,23 +1,24 @@
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { env } from "../../../infrastructure/config/env";
+import { prisma } from "../../../infrastructure/db/prismaClient";
 
 declare global {
   namespace Express {
     interface Request {
-      user?: { sub: string; email: string };
+      user?: { sub: string; email: string; userId: string };
     }
   }
 }
 
-export function authMiddleware(
+export async function authMiddleware(
   req: Request,
   res: Response,
   next: NextFunction
 ) {
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith("Bearer ")) {
-    return res.status(401).json({ message: "Token não informado" });
+    return res.status(401).json({ ok: false, message: "Token não informado" });
   }
 
   const token = authHeader.substring("Bearer ".length);
@@ -25,12 +26,35 @@ export function authMiddleware(
   try {
     const payload = jwt.verify(token, env.jwt.secret, {
       issuer: env.jwt.issuer,
-      audience: env.jwt.audience
+      audience: env.jwt.audience,
     }) as any;
 
-    req.user = { sub: payload.sub, email: payload.email };
-    next();
+    const email = String(payload?.email ?? "").trim();
+    const sub = String(payload?.sub ?? "").trim();
+
+    if (!email) {
+      return res.status(401).json({ ok: false, message: "Token sem email" });
+    }
+
+    // ✅ Busca o usuário REAL (id interno UUID) no seu banco
+    const user = await prisma.user.findUnique({
+      where: { email },
+      select: { id: true, email: true },
+    });
+
+    if (!user) {
+      return res
+        .status(401)
+        .json({ ok: false, message: "Usuário não encontrado no banco" });
+    }
+
+    // ✅ Agora o backend sempre tem o UUID do banco disponível
+    req.user = { sub, email: user.email, userId: user.id };
+
+    return next();
   } catch {
-    return res.status(401).json({ message: "Token inválido ou expirado" });
+    return res
+      .status(401)
+      .json({ ok: false, message: "Token inválido ou expirado" });
   }
 }

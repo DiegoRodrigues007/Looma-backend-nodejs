@@ -20,8 +20,18 @@ import {
   type InstagramTimeseriesPoint,
 } from "../../../domain/metrics/windows/metricsWindows";
 
-const ENABLE_INPROCESS_BACKFILL = String(process.env.ENABLE_INPROCESS_BACKFILL ?? "").toLowerCase() === "true";
-const INPROCESS_BACKFILL_CONCURRENCY = Math.max(1, Number(process.env.INPROCESS_BACKFILL_CONCURRENCY ?? 2) || 2);
+const ENABLE_INPROCESS_BACKFILL =
+  String(process.env.ENABLE_INPROCESS_BACKFILL ?? "").toLowerCase() === "true";
+
+const INPROCESS_BACKFILL_CONCURRENCY = Math.max(
+  1,
+  Number(process.env.INPROCESS_BACKFILL_CONCURRENCY ?? 2) || 2,
+);
+
+const FRONT_URL = String(
+  process.env.FRONT_URL ?? "http://localhost:5173",
+).replace(/\/$/, "");
+const IG_RETURN_PATH = String(process.env.IG_RETURN_PATH ?? "/settings");
 
 function s(v: any): string {
   return String(v ?? "").trim();
@@ -30,9 +40,9 @@ function s(v: any): string {
 function getAuthenticatedUserId(req: Request): string | null {
   const anyReq = req as any;
   const v =
-    anyReq?.user?.sub ||
+    anyReq?.user?.userId || // ✅ UUID do banco (PRIORIDADE)
     anyReq?.user?.id ||
-    anyReq?.user?.userId ||
+    anyReq?.user?.sub || // ⚠️ pode ser id externo
     anyReq?.userId ||
     req.header("x-user-id") ||
     null;
@@ -50,6 +60,28 @@ function safeJson(res: Response, status: number, body: any) {
 function safeRedirect(res: Response, status: number, url: string) {
   if (!res.headersSent) return res.redirect(status, url);
   return undefined;
+}
+
+function wantsJson(req: Request): boolean {
+  const accept = String(req.header("accept") ?? "").toLowerCase();
+  const xrw = String(req.header("x-requested-with") ?? "").toLowerCase();
+  const qs = String((req.query as any)?.format ?? "").toLowerCase();
+  if (qs === "json") return true;
+  if (accept.includes("application/json")) return true;
+  if (xrw === "xmlhttprequest") return true;
+  return false;
+}
+
+function buildFrontUrl(params: Record<string, string | undefined | null>) {
+  const path = IG_RETURN_PATH.startsWith("/")
+    ? IG_RETURN_PATH
+    : `/${IG_RETURN_PATH}`;
+  const u = new URL(`${FRONT_URL}${path}`);
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === null || String(v).trim() === "") continue;
+    u.searchParams.set(k, String(v));
+  }
+  return u.toString();
 }
 
 function dateOnlyUtcFromYmd(ymdStr: string): Date {
@@ -88,7 +120,7 @@ type IgInsightsResponse = {
 
 function pickInsightValueByMetric(
   insights: IgInsightsResponse | null | undefined,
-  metricName: string
+  metricName: string,
 ): number {
   const rows = insights?.data ?? [];
   const row = rows.find((r) => String(r?.name ?? "") === metricName);
@@ -101,7 +133,8 @@ function pickInsightValueByMetric(
     if (typeof v === "string") return Number(v) || 0;
 
     if (v && typeof v === "object") {
-      if ("total_value" in v) return parseAny((v as any).total_value, depth + 1);
+      if ("total_value" in v)
+        return parseAny((v as any).total_value, depth + 1);
       if ("value" in v) return parseAny((v as any).value, depth + 1);
       const tv = (v as any)?.total_value?.value;
       if (tv !== undefined) return parseAny(tv, depth + 1);
@@ -176,14 +209,15 @@ async function fetchDailyInsightsFromGraph(params: {
 
   const reach = toFiniteNumber(pickInsightValueByMetric(insightsA, "reach"));
   let followers = toFiniteNumber(
-    pickInsightValueByMetric(insightsA, "follower_count")
+    pickInsightValueByMetric(insightsA, "follower_count"),
   );
 
   const profileViews = toFiniteNumber(
-    pickInsightValueByMetric(insightsB, "profile_views")
+    pickInsightValueByMetric(insightsB, "profile_views"),
   );
+
   const totalInteractions = toFiniteNumber(
-    pickInsightValueByMetric(insightsB, "total_interactions")
+    pickInsightValueByMetric(insightsB, "total_interactions"),
   );
 
   if (!followers) {
@@ -214,16 +248,18 @@ function isRowAllZero(r: any): boolean {
 async function runPromisePool<T>(
   items: T[],
   concurrency: number,
-  worker: (item: T) => Promise<void>
+  worker: (item: T) => Promise<void>,
 ) {
   const queue = items.slice();
-  const runners = new Array(Math.min(concurrency, queue.length)).fill(null).map(async () => {
-    while (queue.length) {
-      const item = queue.shift();
-      if (!item) break;
-      await worker(item);
-    }
-  });
+  const runners = new Array(Math.min(concurrency, queue.length))
+    .fill(null)
+    .map(async () => {
+      while (queue.length) {
+        const item = queue.shift();
+        if (!item) break;
+        await worker(item);
+      }
+    });
   await Promise.allSettled(runners);
 }
 
@@ -238,44 +274,69 @@ function triggerInProcessBackfill(params: {
   if (!ENABLE_INPROCESS_BACKFILL) return;
 
   setImmediate(async () => {
-    const { userId, instagramAccountId, igUserId, pageAccessToken, daysToFetch } = params;
+    const {
+      userId,
+      instagramAccountId,
+      igUserId,
+      pageAccessToken,
+      daysToFetch,
+    } = params;
 
-    await runPromisePool(daysToFetch, INPROCESS_BACKFILL_CONCURRENCY, async (dayYmd) => {
-      try {
-        const g = await fetchDailyInsightsFromGraph({
-          igUserId,
-          pageAccessToken,
-          dayYmd,
-        });
+    await runPromisePool(
+      daysToFetch,
+      INPROCESS_BACKFILL_CONCURRENCY,
+      async (dayYmd) => {
+        try {
+          const g = await fetchDailyInsightsFromGraph({
+            igUserId,
+            pageAccessToken,
+            dayYmd,
+          });
 
-        await prisma.instagramAccountDailyMetrics.upsert({
-          where: {
-            instagramAccountId_day: {
+          await prisma.instagramAccountDailyMetrics.upsert({
+            where: {
+              instagramAccountId_day: {
+                instagramAccountId,
+                day: dateOnlyUtcFromYmd(dayYmd),
+              },
+            },
+            create: {
+              userId,
               instagramAccountId,
               day: dateOnlyUtcFromYmd(dayYmd),
+              followers: toFiniteNumber(g.followers),
+              profileViewsTotal: toFiniteNumber(g.profileViews),
+              reach: toFiniteNumber(g.reach),
+              totalInteractions: toFiniteNumber(g.totalInteractions),
             },
-          },
-          create: {
-            userId,
-            instagramAccountId,
-            day: dateOnlyUtcFromYmd(dayYmd),
-            followers: toFiniteNumber(g.followers),
-            profileViewsTotal: toFiniteNumber(g.profileViews),
-            reach: toFiniteNumber(g.reach),
-            totalInteractions: toFiniteNumber(g.totalInteractions),
-          },
-          update: {
-            followers: toFiniteNumber(g.followers),
-            profileViewsTotal: toFiniteNumber(g.profileViews),
-            reach: toFiniteNumber(g.reach),
-            totalInteractions: toFiniteNumber(g.totalInteractions),
-          },
-        });
-      } catch {
-        // aqui pode logar se quiser (mas não quebra o endpoint)
-      }
-    });
+            update: {
+              followers: toFiniteNumber(g.followers),
+              profileViewsTotal: toFiniteNumber(g.profileViews),
+              reach: toFiniteNumber(g.reach),
+              totalInteractions: toFiniteNumber(g.totalInteractions),
+            },
+          });
+        } catch {
+          // silencioso
+        }
+      },
+    );
   });
+}
+
+function mapUseCaseCodeToHttp(code?: string): number {
+  switch (code) {
+    case "UNAUTHENTICATED":
+      return 401;
+    case "INVALID_INPUT":
+      return 400;
+    case "NOT_FOUND":
+      return 404;
+    case "NOT_CONNECTED":
+      return 409;
+    default:
+      return 400;
+  }
 }
 
 export class InstagramAuthController {
@@ -284,17 +345,21 @@ export class InstagramAuthController {
     private readonly completeLogin: CompleteIgLoginUseCase,
     private readonly listAccounts: ListInstagramAccountsUseCase,
     private readonly setActiveAccount: SetActiveInstagramAccountUseCase,
-    private readonly dashboardMetrics: GetInstagramDashboardMetricsUseCase
+    private readonly dashboardMetrics: GetInstagramDashboardMetricsUseCase,
   ) {}
 
   async start(req: Request, res: Response) {
     const userId = getAuthenticatedUserId(req);
-    if (!userId) return safeJson(res, 401, { ok: false, message: "Não autenticado" });
+    if (!userId)
+      return safeJson(res, 401, { ok: false, message: "Não autenticado" });
+
+    const returnTo = s((req.query as any)?.returnTo) || IG_RETURN_PATH;
 
     const rawState = JSON.stringify({
       uid: userId,
       nonce: crypto.randomBytes(12).toString("hex"),
       ts: Date.now(),
+      returnTo,
     });
 
     const signedState = signState(rawState);
@@ -312,24 +377,43 @@ export class InstagramAuthController {
     const code = String(req.query.code ?? "");
     const state = String(req.query.state ?? "");
 
-    if (!code) return safeJson(res, 400, { ok: false, message: "code é obrigatório" });
+    if (!code)
+      return safeJson(res, 400, { ok: false, message: "code é obrigatório" });
 
     let userId = getIgLoginCookie(req);
+    let returnToFromState: string | null = null;
+
     if (state) {
-      const parsed = safeParseState(state);
-      if (!userId && parsed?.uid) userId = parsed.uid;
+      const parsed = safeParseState(state) as any;
+      if (!userId && parsed?.uid) userId = String(parsed.uid);
+      if (parsed?.returnTo) returnToFromState = String(parsed.returnTo);
     }
 
     if (!userId) {
       clearIgLoginCookie(res);
+      if (!wantsJson(req)) {
+        const url = buildFrontUrl({ ig: "error", reason: "session_expired" });
+        return safeRedirect(res, 302, url);
+      }
       return safeJson(res, 401, { ok: false, message: "Sessão expirada" });
     }
+
+    const returnTo = returnToFromState || IG_RETURN_PATH;
 
     try {
       const result = await this.completeLogin.execute(code, state, userId);
 
       if ((result as any)?.status === "reauth_required") {
         clearIgLoginCookie(res);
+
+        if (!wantsJson(req)) {
+          const url = new URL(
+            `${FRONT_URL}${returnTo.startsWith("/") ? returnTo : `/${returnTo}`}`,
+          );
+          url.searchParams.set("ig", "reauth");
+          return safeRedirect(res, 302, url.toString());
+        }
+
         return safeJson(res, 200, { ok: true, ...result });
       }
 
@@ -350,12 +434,17 @@ export class InstagramAuthController {
               username: c.username ? s(c.username) : null,
               accountType: c.accountType ? s(c.accountType) : null,
               facebookPageId: s(c.facebookPageId),
-              facebookPageName: c.facebookPageName ? s(c.facebookPageName) : null,
+              facebookPageName: c.facebookPageName
+                ? s(c.facebookPageName)
+                : null,
               pageAccessToken: s(c.pageAccessToken),
               source: s(c.source),
               instagramAccountId: null,
             }))
-            .filter((c) => c.igUserId && c.facebookPageId && c.pageAccessToken && c.source);
+            .filter(
+              (c) =>
+                c.igUserId && c.facebookPageId && c.pageAccessToken && c.source,
+            );
 
           await prisma.instagramCandidate.deleteMany({
             where: { userId: s(userId), selectionId },
@@ -368,18 +457,53 @@ export class InstagramAuthController {
             });
           }
         } catch {
-          // silencioso (não loga)
+          // silencioso
         }
 
         clearIgLoginCookie(res);
+
+        if (!wantsJson(req)) {
+          const url = new URL(
+            `${FRONT_URL}${returnTo.startsWith("/") ? returnTo : `/${returnTo}`}`,
+          );
+          url.searchParams.set("ig", "choose");
+          url.searchParams.set("selectionId", selectionId);
+          return safeRedirect(res, 302, url.toString());
+        }
+
         return safeJson(res, 200, { ok: true, ...result });
       }
 
       clearIgLoginCookie(res);
+
+      if (!wantsJson(req)) {
+        const url = new URL(
+          `${FRONT_URL}${returnTo.startsWith("/") ? returnTo : `/${returnTo}`}`,
+        );
+        url.searchParams.set("ig", "ok");
+        return safeRedirect(res, 302, url.toString());
+      }
+
       return safeJson(res, 200, { ok: true, status: "ok" });
     } catch (e: any) {
       clearIgLoginCookie(res);
-      return safeJson(res, 500, { ok: false, message: e?.message ?? "Erro no login IG" });
+
+      if (!wantsJson(req)) {
+        const url = new URL(
+          `${FRONT_URL}${returnTo.startsWith("/") ? returnTo : `/${returnTo}`}`,
+        );
+        url.searchParams.set("ig", "error");
+        url.searchParams.set(
+          "reason",
+          s(e?.message ?? "login_failed").slice(0, 140),
+        );
+        return safeRedirect(res, 302, url.toString());
+      }
+
+      return safeJson(res, 500, {
+        ok: false,
+        message: e?.message ?? "Erro no login IG",
+      });
     }
   }
 
@@ -387,7 +511,8 @@ export class InstagramAuthController {
     res.setHeader("Cache-Control", "no-store");
 
     const userId = getAuthenticatedUserId(req);
-    if (!userId) return safeJson(res, 401, { ok: false, message: "Não autenticado" });
+    if (!userId)
+      return safeJson(res, 401, { ok: false, message: "Não autenticado" });
 
     let selectionId = s((req.query as any)?.selectionId);
 
@@ -421,7 +546,8 @@ export class InstagramAuthController {
     res.setHeader("Cache-Control", "no-store");
 
     const userId = getAuthenticatedUserId(req);
-    if (!userId) return safeJson(res, 401, { ok: false, message: "Não autenticado" });
+    if (!userId)
+      return safeJson(res, 401, { ok: false, message: "Não autenticado" });
 
     const user = await prisma.user.findUnique({
       where: { id: s(userId) },
@@ -432,7 +558,6 @@ export class InstagramAuthController {
       where: {
         userId: s(userId),
         isConnected: true,
-        OR: [{ pageAccessToken: { not: null } }, { accessToken: { not: null } }],
       },
       orderBy: { updatedAt: "desc" },
       select: {
@@ -449,7 +574,9 @@ export class InstagramAuthController {
     });
 
     let activeId = user?.activeInstagramAccountId ?? null;
-    let active = activeId ? accounts.find((a) => a.id === activeId) ?? null : null;
+    let active = activeId
+      ? (accounts.find((a) => a.id === activeId) ?? null)
+      : null;
 
     if ((!activeId || !active) && accounts.length > 0) {
       active = accounts[0];
@@ -484,15 +611,194 @@ export class InstagramAuthController {
     });
   }
 
+  async confirm(req: Request, res: Response) {
+    res.setHeader("Cache-Control", "no-store");
+
+    const userId = getAuthenticatedUserId(req);
+    if (!userId) {
+      return safeJson(res, 401, {
+        ok: false,
+        code: "UNAUTHENTICATED",
+        message: "Não autenticado",
+      });
+    }
+
+    const selectionId = s((req.body as any)?.selectionId);
+    const igUserIdsRaw = (req.body as any)?.igUserIds;
+    const candidateIdsRaw = (req.body as any)?.candidateIds;
+
+    const igUserIds: string[] = Array.isArray(igUserIdsRaw)
+      ? igUserIdsRaw.map((x: any) => s(x)).filter(Boolean)
+      : [];
+
+    const candidateIds: string[] = Array.isArray(candidateIdsRaw)
+      ? candidateIdsRaw.map((x: any) => s(x)).filter(Boolean)
+      : [];
+
+    if (!selectionId) {
+      return safeJson(res, 400, {
+        ok: false,
+        code: "INVALID_INPUT",
+        message: "selectionId é obrigatório",
+      });
+    }
+
+    if (igUserIds.length === 0 && candidateIds.length === 0) {
+      return safeJson(res, 400, {
+        ok: false,
+        code: "INVALID_INPUT",
+        message: "Envie igUserIds[] (recomendado) ou candidateIds[]",
+      });
+    }
+
+    const candidates = await prisma.instagramCandidate.findMany({
+      where: {
+        userId: s(userId),
+        selectionId: selectionId,
+      },
+      orderBy: candidatesOrderBy(),
+      take: 200,
+    });
+
+    const selected = candidates.filter((c: any) => {
+      const byIg =
+        igUserIds.length > 0 ? igUserIds.includes(s(c.igUserId)) : false;
+      const byId =
+        candidateIds.length > 0 ? candidateIds.includes(s(c.id)) : false;
+      return byIg || byId;
+    });
+
+    if (selected.length === 0) {
+      return safeJson(res, 404, {
+        ok: false,
+        code: "NOT_FOUND",
+        message:
+          "Nenhum candidato encontrado para confirmar (selectionId/seleção inválidos).",
+      });
+    }
+
+    const createdOrUpdated: any[] = [];
+
+    for (const c of selected as any[]) {
+      const igUserId = s(c.igUserId);
+      const facebookPageId = s(c.facebookPageId);
+      const pageAccessToken = s(c.pageAccessToken);
+
+      if (!igUserId || !facebookPageId || !pageAccessToken) continue;
+
+      const existing = await prisma.instagramAccount.findFirst({
+        where: { userId: s(userId), igUserId },
+        select: { id: true },
+      });
+
+      const dataToSet: any = {
+        userId: s(userId),
+        igUserId,
+        facebookPageId,
+        pageAccessToken,
+        username: c.username ?? null,
+        accountType: c.accountType ?? null,
+        isConnected: true,
+      };
+
+      let acc: any;
+      if (existing?.id) {
+        acc = await prisma.instagramAccount.update({
+          where: { id: existing.id },
+          data: dataToSet,
+          select: {
+            id: true,
+            igUserId: true,
+            username: true,
+            accountType: true,
+            facebookPageId: true,
+            isConnected: true,
+            updatedAt: true,
+            expiresAt: true,
+          },
+        });
+      } else {
+        acc = await prisma.instagramAccount.create({
+          data: dataToSet,
+          select: {
+            id: true,
+            igUserId: true,
+            username: true,
+            accountType: true,
+            facebookPageId: true,
+            isConnected: true,
+            updatedAt: true,
+            expiresAt: true,
+          },
+        });
+      }
+
+      createdOrUpdated.push(acc);
+
+      try {
+        await prisma.instagramCandidate.updateMany({
+          where: { userId: s(userId), selectionId, igUserId },
+          data: {
+            selectedAt: new Date(),
+            instagramAccountId: acc.id,
+          } as any,
+        });
+      } catch {}
+    }
+
+    if (createdOrUpdated.length === 0) {
+      return safeJson(res, 400, {
+        ok: false,
+        code: "INVALID_INPUT",
+        message:
+          "Candidatos selecionados não têm dados válidos (igUserId/pageAccessToken).",
+      });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: s(userId) },
+      select: { activeInstagramAccountId: true },
+    });
+
+    let activeInstagramAccountId = user?.activeInstagramAccountId ?? null;
+
+    if (!activeInstagramAccountId) {
+      activeInstagramAccountId = createdOrUpdated[0].id;
+      try {
+        await prisma.user.update({
+          where: { id: s(userId) },
+          data: { activeInstagramAccountId },
+        });
+      } catch {}
+    }
+
+    return safeJson(res, 200, {
+      ok: true,
+      selectionId,
+      activeInstagramAccountId,
+      confirmed: createdOrUpdated,
+    });
+  }
+
+  // =========================================================
+  // ✅ FIX AQUI: accounts() chamando ListInstagramAccountsUseCase
+  // - execute() deve receber string (userId)
+  // - remover try/catch que mascarava bug
+  // - não embrulhar { ok: true, ...out } pra não corromper shape
+  // =========================================================
   async accounts(req: Request, res: Response) {
     res.setHeader("Cache-Control", "no-store");
 
     const userId = getAuthenticatedUserId(req);
-    if (!userId) return safeJson(res, 401, { ok: false, message: "Não autenticado" });
+    if (!userId)
+      return safeJson(res, 401, { ok: false, message: "Não autenticado" });
 
-    if (this.listAccounts && typeof (this.listAccounts as any).execute === "function") {
+    if (
+      this.listAccounts &&
+      typeof (this.listAccounts as any).execute === "function"
+    ) {
       const out = await (this.listAccounts as any).execute(s(userId));
-      return safeJson(res, 200, { ok: true, ...out });
+      return safeJson(res, 200, out);
     }
 
     const user = await prisma.user.findUnique({
@@ -504,7 +810,6 @@ export class InstagramAuthController {
       where: {
         userId: s(userId),
         isConnected: true,
-        OR: [{ pageAccessToken: { not: null } }, { accessToken: { not: null } }],
       },
       orderBy: { updatedAt: "desc" },
       select: {
@@ -530,9 +835,7 @@ export class InstagramAuthController {
           where: { id: s(userId) },
           data: { activeInstagramAccountId: activeId },
         });
-      } catch {
-        // silencioso
-      }
+      } catch {}
     }
 
     return safeJson(res, 200, {
@@ -557,15 +860,35 @@ export class InstagramAuthController {
     res.setHeader("Cache-Control", "no-store");
 
     const userId = getAuthenticatedUserId(req);
-    if (!userId) return safeJson(res, 401, { ok: false, message: "Não autenticado" });
+    if (!userId)
+      return safeJson(res, 401, {
+        ok: false,
+        code: "UNAUTHENTICATED",
+        message: "Não autenticado",
+      });
 
     const instagramAccountId = s((req.body as any)?.instagramAccountId);
     if (!instagramAccountId) {
-      return safeJson(res, 400, { ok: false, message: "instagramAccountId é obrigatório" });
+      return safeJson(res, 400, {
+        ok: false,
+        code: "INVALID_INPUT",
+        message: "instagramAccountId é obrigatório",
+      });
     }
 
-    if (this.setActiveAccount && typeof (this.setActiveAccount as any).execute === "function") {
-      const out = await (this.setActiveAccount as any).execute(s(userId), instagramAccountId);
+    if (
+      this.setActiveAccount &&
+      typeof (this.setActiveAccount as any).execute === "function"
+    ) {
+      const out = await (this.setActiveAccount as any).execute({
+        userId: s(userId),
+        instagramAccountId,
+      });
+
+      if (out && out.ok === false) {
+        return safeJson(res, mapUseCaseCodeToHttp(out.code), out);
+      }
+
       return safeJson(res, 200, { ok: true, ...out });
     }
 
@@ -574,7 +897,10 @@ export class InstagramAuthController {
         id: instagramAccountId,
         userId: s(userId),
         isConnected: true,
-        OR: [{ pageAccessToken: { not: null } }, { accessToken: { not: null } }],
+        OR: [
+          { pageAccessToken: { not: null } },
+          { accessToken: { not: null } },
+        ],
       },
       select: {
         id: true,
@@ -589,7 +915,9 @@ export class InstagramAuthController {
     if (!exists) {
       return safeJson(res, 404, {
         ok: false,
-        message: "Conta Instagram não encontrada para este usuário (ou não está conectada).",
+        code: "NOT_FOUND",
+        message:
+          "Conta Instagram não encontrada para este usuário (ou não está conectada).",
       });
     }
 
@@ -612,11 +940,68 @@ export class InstagramAuthController {
     });
   }
 
+  async disconnect(req: Request, res: Response) {
+    res.setHeader("Cache-Control", "no-store");
+
+    const userId = getAuthenticatedUserId(req);
+    if (!userId)
+      return safeJson(res, 401, {
+        ok: false,
+        code: "UNAUTHENTICATED",
+        message: "Não autenticado",
+      });
+
+    const requestedId = s((req.body as any)?.instagramAccountId);
+
+    const user = await prisma.user.findUnique({
+      where: { id: s(userId) },
+      select: { activeInstagramAccountId: true },
+    });
+
+    const instagramAccountId = requestedId || s(user?.activeInstagramAccountId);
+    if (!instagramAccountId) {
+      if (!res.headersSent) return res.status(204).send();
+      return undefined;
+    }
+
+    const acc = await prisma.instagramAccount.findFirst({
+      where: { id: instagramAccountId, userId: s(userId) },
+      select: { id: true },
+    });
+
+    if (!acc)
+      return safeJson(res, 404, {
+        ok: false,
+        code: "NOT_FOUND",
+        message: "Conta não encontrada",
+      });
+
+    await prisma.instagramAccount.update({
+      where: { id: acc.id },
+      data: {
+        isConnected: false,
+        accessToken: null,
+        pageAccessToken: null,
+        expiresAt: null,
+        facebookPageId: null,
+      },
+    });
+
+    await prisma.user.update({
+      where: { id: s(userId) },
+      data: { activeInstagramAccountId: null },
+    });
+
+    if (!res.headersSent) return res.status(204).send();
+    return undefined;
+  }
+
   async metrics(req: Request, res: Response) {
     res.setHeader("Cache-Control", "no-store");
 
     const userId = getAuthenticatedUserId(req);
-    if (!userId) return safeJson(res, 401, { ok: false, message: "Não autenticado" });
+    if (!userId)
+      return safeJson(res, 401, { ok: false, message: "Não autenticado" });
 
     const from = String(req.query.from ?? "").slice(0, 10);
     const to = String(req.query.to ?? "").slice(0, 10);
@@ -649,7 +1034,10 @@ export class InstagramAuthController {
       }));
 
     if (!account) {
-      return safeJson(res, 404, { ok: false, message: "Conta do Instagram não encontrada" });
+      return safeJson(res, 404, {
+        ok: false,
+        message: "Conta do Instagram não encontrada",
+      });
     }
 
     const pageAccessToken = s((account as any)?.pageAccessToken);
@@ -661,7 +1049,7 @@ export class InstagramAuthController {
 
     const ALWAYS_REFETCH_LAST_DAYS = 7;
     const lastDaysSet = new Set(
-      days.slice(Math.max(0, days.length - ALWAYS_REFETCH_LAST_DAYS))
+      days.slice(Math.max(0, days.length - ALWAYS_REFETCH_LAST_DAYS)),
     );
 
     const existing = await prisma.instagramAccountDailyMetrics.findMany({
@@ -684,11 +1072,13 @@ export class InstagramAuthController {
       const r = byDayExisting.get(d);
       if (!r) return false;
       if (!refillZeros) return false;
-      if (lastDaysSet.has(d)) return true; 
+      if (lastDaysSet.has(d)) return true;
       return isRowAllZero(r);
     });
 
-    const suggestedFetchDays = force ? [...days] : Array.from(new Set([...missingDays, ...zeroDays]));
+    const suggestedFetchDays = force
+      ? [...days]
+      : Array.from(new Set([...missingDays, ...zeroDays]));
 
     const timeseries: InstagramTimeseriesPoint[] = days.map((day) => {
       const r = byDayExisting.get(day);
@@ -708,10 +1098,13 @@ export class InstagramAuthController {
       };
     });
 
-    const totalReach = timeseries.reduce((a, b) => a + toFiniteNumber(b.reach), 0);
+    const totalReach = timeseries.reduce(
+      (a, b) => a + toFiniteNumber(b.reach),
+      0,
+    );
     const totalInteractions = timeseries.reduce(
       (a, b) => a + toFiniteNumber(b.totalInteractions),
-      0
+      0,
     );
 
     const avgEngagementRate =
@@ -729,13 +1122,13 @@ export class InstagramAuthController {
         (x) =>
           toFiniteNumber(x.reach) === 0 &&
           toFiniteNumber(x.profileViews) === 0 &&
-          toFiniteNumber(x.totalInteractions) === 0
+          toFiniteNumber(x.totalInteractions) === 0,
       );
 
     const summary = buildWindowsSummary(timeseries);
 
     const shouldAutoBackfill =
-      parseBool((req.query as any)?.autoBackfill) ?? false; 
+      parseBool((req.query as any)?.autoBackfill) ?? false;
 
     if (shouldAutoBackfill && hasGraphCreds && suggestedFetchDays.length > 0) {
       triggerInProcessBackfill({
@@ -766,13 +1159,13 @@ export class InstagramAuthController {
         generatedBy: "database",
         hasGraphCreds,
         allZero,
-        hint: allZero ? "Tudo zerado (provável falta de histórico no banco)." : "OK",
-
+        hint: allZero
+          ? "Tudo zerado (provável falta de histórico no banco)."
+          : "OK",
         missingDaysCount: missingDays.length,
         zeroDaysCount: zeroDays.length,
         suggestedFetchDaysCount: suggestedFetchDays.length,
         suggestedFetchDaysPreview: suggestedFetchDays.slice(0, 10),
-
         params: {
           force,
           refillZeros,
