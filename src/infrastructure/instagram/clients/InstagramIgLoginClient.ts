@@ -1,4 +1,4 @@
-import axios, { AxiosInstance, AxiosError } from "axios";
+import axios, { AxiosError, AxiosInstance } from "axios";
 import crypto from "crypto";
 
 /* =========================
@@ -225,11 +225,7 @@ export class InstagramIgLoginClient {
     return order[level] >= current;
   }
 
-  private log(
-    level: "debug" | "info" | "warn" | "error",
-    msg: string,
-    obj?: any
-  ) {
+  private log(level: "debug" | "info" | "warn" | "error", msg: string, obj?: any) {
     if (!this.debugLogsEnabled) return;
     if (!this.shouldLog(level)) return;
 
@@ -345,6 +341,7 @@ export class InstagramIgLoginClient {
 
       const res = await axios.get(this.tokenUrl, {
         params: {
+          // ✅ troca SHORT -> LONG
           grant_type: "fb_exchange_token",
           client_id: this.clientId,
           client_secret: this.clientSecret,
@@ -377,6 +374,10 @@ export class InstagramIgLoginClient {
     }
   }
 
+  /**
+   * ✅ Refresh correto do LONG token (Graph API)
+   * - grant_type=fb_long_lived_token
+   */
   async refreshLong(longToken: string): Promise<string> {
     const started = this.nowMs();
     try {
@@ -387,7 +388,7 @@ export class InstagramIgLoginClient {
 
       const res = await axios.get(this.tokenUrl, {
         params: {
-          grant_type: "fb_exchange_token",
+          grant_type: "fb_long_lived_token",
           client_id: this.clientId,
           client_secret: this.clientSecret,
           fb_exchange_token: longToken,
@@ -595,9 +596,9 @@ export class InstagramIgLoginClient {
 
   /* =========================
      Internal: fetch pages
-     ✅ Agora: pagina /me/accounts
-     ✅ E garante TODAS as páginas selecionadas (debug_token target_ids)
-     ✅ E mantém fallback Business Manager se necessário
+     ✅ pagina /me/accounts
+     ✅ garante TODAS as páginas selecionadas (debug_token target_ids)
+     ✅ fallback Business Manager se necessário
   ========================= */
 
   private async fetchPages(userAccessToken: string): Promise<PageItem[]> {
@@ -617,31 +618,43 @@ export class InstagramIgLoginClient {
     let after: string | undefined = undefined;
 
     for (let guard = 0; guard < 20; guard++) {
-      const pagesRes = await this.http.get("/me/accounts", {
-        params: {
-          fields: "id,name,access_token",
-          limit: 100,
-          after,
-          access_token: userAccessToken,
-        },
-      });
+      try {
+        const pagesRes = await this.http.get("/me/accounts", {
+          params: {
+            fields: "id,name,access_token",
+            limit: 100,
+            after,
+            access_token: userAccessToken,
+          },
+        });
 
-      this.log("debug", "pages:/me/accounts:raw", {
-        dataPreview: this.previewJson(pagesRes.data),
-      });
+        this.log("debug", "pages:/me/accounts:raw", {
+          dataPreview: this.previewJson(pagesRes.data),
+        });
 
-      const batch = (pagesRes.data?.data ?? []) as PageItem[];
-      if (batch.length) collected.push(...batch);
+        const batch = (pagesRes.data?.data ?? []) as PageItem[];
+        if (batch.length) collected.push(...batch);
 
-      const nextAfter = pagesRes.data?.paging?.cursors?.after as string | undefined;
-      if (!nextAfter || nextAfter === after) break;
-      after = nextAfter;
+        const nextAfter = pagesRes.data?.paging?.cursors?.after as
+          | string
+          | undefined;
+        if (!nextAfter || nextAfter === after) break;
+        after = nextAfter;
 
-      // se já pegamos todas as selecionadas, para cedo
-      if (selectedPageIds.length) {
-        const have = new Set(collected.map((p) => p.id));
-        const missing = selectedPageIds.filter((id) => !have.has(id));
-        if (missing.length === 0) break;
+        // se já pegamos todas as selecionadas, para cedo
+        if (selectedPageIds.length) {
+          const have = new Set(collected.map((p) => p.id));
+          const missing = selectedPageIds.filter((id) => !have.has(id));
+          if (missing.length === 0) break;
+        }
+      } catch (e) {
+        const ax = axios.isAxiosError(e) ? (e as AxiosError<any>) : null;
+        this.log("warn", "pages:/me/accounts:page:failed", {
+          status: ax?.response?.status,
+          bodyPreview: this.previewJson(ax?.response?.data),
+          err: e instanceof Error ? e.message : String(e),
+        });
+        break;
       }
     }
 
@@ -661,9 +674,13 @@ export class InstagramIgLoginClient {
 
     // 2) FALLBACK: Business Manager (se vier 0)
     if (!pages.length) {
-      this.log("warn", "pages:fallback:/me/accounts empty -> trying /me/businesses", {
-        token: this.maskToken(userAccessToken),
-      });
+      this.log(
+        "warn",
+        "pages:fallback:/me/accounts empty -> trying /me/businesses",
+        {
+          token: this.maskToken(userAccessToken),
+        }
+      );
 
       const bStarted = this.nowMs();
       const businessesRes = await this.http.get("/me/businesses", {
@@ -701,7 +718,11 @@ export class InstagramIgLoginClient {
             count: owned.length,
             preview: owned
               .slice(0, 10)
-              .map((p) => ({ id: p.id, name: p.name, hasToken: !!p.access_token })),
+              .map((p) => ({
+                id: p.id,
+                name: p.name,
+                hasToken: !!p.access_token,
+              })),
             tookMs: this.msSince(ownedStarted),
           });
           bmCollected.push(...owned);
@@ -729,7 +750,11 @@ export class InstagramIgLoginClient {
             count: clientPages.length,
             preview: clientPages
               .slice(0, 10)
-              .map((p) => ({ id: p.id, name: p.name, hasToken: !!p.access_token })),
+              .map((p) => ({
+                id: p.id,
+                name: p.name,
+                hasToken: !!p.access_token,
+              })),
             tookMs: this.msSince(clientStarted),
           });
           bmCollected.push(...clientPages);
@@ -1019,10 +1044,7 @@ export class InstagramIgLoginClient {
           continue;
         }
 
-        const profile = igProfileRes.data as {
-          id: string;
-          username: string;
-        };
+        const profile = igProfileRes.data as { id: string; username: string };
 
         const key = `${profile.id}|${pageId}`;
         if (dedup.has(key)) {

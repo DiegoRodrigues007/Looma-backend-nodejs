@@ -1,3 +1,4 @@
+// src/application/use-cases/instagram/GetInstagramDashboardMetricsUseCase.ts
 import type { PrismaClient } from "@prisma/client";
 import {
   buildWindowsSummary,
@@ -18,7 +19,20 @@ export type DashboardMetricsResult = {
   filters: { from: string; to: string };
 
   kpis: {
+    /**
+     * ✅ Compat com retorno atual do seu backend:
+     * "followers" agora é o TOTAL (snapshot) do dia final do range (safeTo).
+     */
     followers: number;
+
+    /**
+     * ✅ O que você quer de verdade:
+     * total / ganhou / perdeu
+     */
+    followersTotal: number;
+    followersGained: number;
+    followersLost: number;
+
     reach: number;
     totalInteractions: number;
     engagementRate: number;
@@ -65,7 +79,6 @@ export type BackfillDaysFn = (args: {
 
 export type GetInstagramDashboardMetricsParams = {
   requestId: string;
-
   userId: string;
 
   // range
@@ -86,17 +99,16 @@ export type GetInstagramDashboardMetricsParams = {
   maxRangeDays?: number; // default 92
 };
 
-function s(v: any): string {
+function s(v: unknown): string {
   return String(v ?? "").trim();
 }
 
-function toFiniteNumber(v: any): number {
+function toFiniteNumber(v: unknown): number {
   const n = typeof v === "number" ? v : Number(v);
   return Number.isFinite(n) ? n : 0;
 }
 
 function ymd(d: Date): string {
-  // YYYY-MM-DD em UTC
   const yyyy = d.getUTCFullYear();
   const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
   const dd = String(d.getUTCDate()).padStart(2, "0");
@@ -128,11 +140,22 @@ function clampRangeDays(from: string, to: string, maxDays: number) {
   return { days: tail, from: tail[0], to: tail[tail.length - 1] };
 }
 
-function isRowAllZero(r: any): boolean {
-  const reach = toFiniteNumber(r?.reach);
-  const pv = toFiniteNumber(r?.profileViewsTotal);
-  const ti = toFiniteNumber(r?.totalInteractions);
+function isRowAllZero(
+  r:
+    | Pick<DailyMetricRow, "reach" | "profileViewsTotal" | "totalInteractions">
+    | undefined
+): boolean {
+  if (!r) return true;
+  const reach = toFiniteNumber(r.reach);
+  const pv = toFiniteNumber(r.profileViewsTotal);
+  const ti = toFiniteNumber(r.totalInteractions);
   return reach === 0 && pv === 0 && ti === 0;
+}
+
+function addDaysYmd(day: string, deltaDays: number): string {
+  const d = dateOnlyUtcFromYmd(day);
+  const x = new Date(d.getTime() + deltaDays * 86400 * 1000);
+  return ymd(x);
 }
 
 export class GetInstagramDashboardMetricsUseCase {
@@ -170,25 +193,31 @@ export class GetInstagramDashboardMetricsUseCase {
       maxRangeDays
     );
 
-    // 1) carrega existentes
-    const existing = await this.prisma.instagramAccountDailyMetrics.findMany({
-      where: {
-        userId,
-        instagramAccountId,
-        day: {
-          gte: dateOnlyUtcFromYmd(safeFrom),
-          lte: dateOnlyUtcFromYmd(safeTo),
+    // 1) carrega existentes (tipado, sem any)
+    const existing: DailyMetricRow[] =
+      await this.prisma.instagramAccountDailyMetrics.findMany({
+        where: {
+          userId,
+          instagramAccountId,
+          day: {
+            gte: dateOnlyUtcFromYmd(safeFrom),
+            lte: dateOnlyUtcFromYmd(safeTo),
+          },
         },
-      },
-      orderBy: { day: "asc" },
-    });
+        orderBy: { day: "asc" },
+        select: {
+          day: true,
+          followers: true,
+          reach: true,
+          profileViewsTotal: true,
+          totalInteractions: true,
+        },
+      });
 
-    const byDayExisting = new Map<string, any>();
+    const byDayExisting = new Map<string, DailyMetricRow>();
     for (const r of existing) byDayExisting.set(ymd(r.day), r);
 
     // 2) decide dias pra refetch:
-    // - force => tudo
-    // - senão => sempre últimos N dias + faltantes + (se refillZeros) all-zero
     const tailSet = new Set(
       days.slice(Math.max(0, days.length - alwaysRefetchLastDays))
     );
@@ -198,7 +227,7 @@ export class GetInstagramDashboardMetricsUseCase {
       : days.filter((d) => {
           const r = byDayExisting.get(d);
           if (!r) return true; // faltante
-          if (tailSet.has(d)) return true; // ✅ sempre refaz últimos N dias
+          if (tailSet.has(d)) return true; // sempre refaz últimos N dias
           if (!refillZeros) return false;
           return isRowAllZero(r); // zeros antigos
         });
@@ -215,26 +244,33 @@ export class GetInstagramDashboardMetricsUseCase {
         })
       : { filledDays: 0, errors: [] as Array<{ day: string; message: string }> };
 
-    // 4) carrega do banco após backfill
-    const rows = (await this.prisma.instagramAccountDailyMetrics.findMany({
-      where: {
-        userId,
-        instagramAccountId,
-        day: {
-          gte: dateOnlyUtcFromYmd(safeFrom),
-          lte: dateOnlyUtcFromYmd(safeTo),
+    // 4) carrega do banco após backfill (tipado, sem cast)
+    const rows: DailyMetricRow[] =
+      await this.prisma.instagramAccountDailyMetrics.findMany({
+        where: {
+          userId,
+          instagramAccountId,
+          day: {
+            gte: dateOnlyUtcFromYmd(safeFrom),
+            lte: dateOnlyUtcFromYmd(safeTo),
+          },
         },
-      },
-      orderBy: { day: "asc" },
-    })) as unknown as DailyMetricRow[];
+        orderBy: { day: "asc" },
+        select: {
+          day: true,
+          followers: true,
+          reach: true,
+          profileViewsTotal: true,
+          totalInteractions: true,
+        },
+      });
 
     const byDay: Record<string, DailyMetricRow> = {};
     for (const r of rows) byDay[ymd(r.day)] = r;
 
-    // 5) monta timeseries alinhado aos dias (mesmo se faltar algum, ele entra 0)
+    // 5) monta timeseries alinhado aos dias
     const timeseries: InstagramTimeseriesPoint[] = days.map((day) => {
       const r = byDay[day];
-      const followers = toFiniteNumber(r?.followers);
       const reach = toFiniteNumber(r?.reach);
       const profileViews = toFiniteNumber(r?.profileViewsTotal);
       const totalInteractions = toFiniteNumber(r?.totalInteractions);
@@ -242,7 +278,7 @@ export class GetInstagramDashboardMetricsUseCase {
 
       return {
         date: day,
-        followers,
+        followers: 0, // ✅ mantém 0 na série
         reach,
         profileViews,
         totalInteractions,
@@ -250,8 +286,12 @@ export class GetInstagramDashboardMetricsUseCase {
       };
     });
 
-    // 6) KPIs (mantém compatível com teu retorno atual)
-    const totalReach = timeseries.reduce((a, b) => a + toFiniteNumber(b.reach), 0);
+    // 6) KPIs de métricas diárias
+    const totalReach = timeseries.reduce(
+      (a, b) => a + toFiniteNumber(b.reach),
+      0
+    );
+
     const totalInteractions = timeseries.reduce(
       (a, b) => a + toFiniteNumber(b.totalInteractions),
       0
@@ -261,10 +301,62 @@ export class GetInstagramDashboardMetricsUseCase {
       timeseries.reduce((a, b) => a + toFiniteNumber(b.engagementRate), 0) /
       Math.max(1, timeseries.length);
 
-    const followers =
-      timeseries.length > 0 ? toFiniteNumber(timeseries[timeseries.length - 1].followers) : 0;
+    /**
+     * 7) ✅ Followers POR CONTA (FIX REAL)
+     *
+     * Antes você pegava de MetricsSnapshot (userId+platform+date) e isso NÃO varia por instagramAccountId,
+     * então trocar a conta no Topbar não mudava followers.
+     *
+     * Agora:
+     * - Prioriza instagramAccountDailyMetrics.followers (filtrado por instagramAccountId)
+     * - Se vier nulo/0 (por instabilidade), usa MetricsSnapshot como fallback (global)
+     */
+    const dayTo = safeTo;
+    const dayPrev = addDaysYmd(safeTo, -1);
 
-    // 7) summary 7d / 30d (aqui é o que você quer pro dashboard)
+    const dailyTo = byDay[dayTo];
+    const dailyPrev = byDay[dayPrev];
+
+    let followersTotal = toFiniteNumber(dailyTo?.followers ?? 0);
+    let followersPrev = toFiniteNumber(dailyPrev?.followers ?? 0);
+
+    // fallback global apenas se daily vier vazio/zero
+    if (followersTotal === 0 || followersPrev === 0) {
+      const [snapTo, snapPrev] = await Promise.all([
+        this.prisma.metricsSnapshot.findUnique({
+          where: {
+            userId_platform_date: {
+              userId,
+              platform: "instagram",
+              date: dateOnlyUtcFromYmd(dayTo),
+            },
+          },
+          select: { followers: true },
+        }),
+        this.prisma.metricsSnapshot.findUnique({
+          where: {
+            userId_platform_date: {
+              userId,
+              platform: "instagram",
+              date: dateOnlyUtcFromYmd(dayPrev),
+            },
+          },
+          select: { followers: true },
+        }),
+      ]);
+
+      const snapFollowersTotal = toFiniteNumber(snapTo?.followers ?? 0);
+      const snapFollowersPrev = toFiniteNumber(snapPrev?.followers ?? 0);
+
+      if (followersTotal === 0) followersTotal = snapFollowersTotal;
+      if (followersPrev === 0) followersPrev = snapFollowersPrev;
+    }
+
+    const diff = followersTotal - followersPrev;
+    const followersGained = diff > 0 ? diff : 0;
+    const followersLost = diff < 0 ? Math.abs(diff) : 0;
+
+    // 8) summary 7d / 30d
     const summary = buildWindowsSummary(timeseries);
 
     return {
@@ -273,14 +365,17 @@ export class GetInstagramDashboardMetricsUseCase {
       filters: { from: safeFrom, to: safeTo },
 
       kpis: {
-        followers,
+        followers: followersTotal, // compat
+        followersTotal,
+        followersGained,
+        followersLost,
+
         reach: totalReach,
         totalInteractions,
         engagementRate: avgEngagementRate,
       },
 
       timeseries,
-
       summary,
 
       meta: {

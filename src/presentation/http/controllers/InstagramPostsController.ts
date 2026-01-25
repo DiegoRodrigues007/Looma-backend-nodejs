@@ -1,3 +1,4 @@
+// src/presentation/http/controllers/InstagramPostsController.ts
 import { Request, Response } from "express";
 import { prisma } from "../../../infrastructure/db/prismaClient";
 
@@ -70,6 +71,7 @@ export async function listInstagramPosts(req: Request, res: Response) {
 
     const where: any = { userId };
 
+    // 🔑 REGRA DE SELEÇÃO DA CONTA (ALINHADA COM SYNC)
     if (instagramAccountId) {
       const owned = await prisma.instagramAccount.findFirst({
         where: { id: instagramAccountId, userId },
@@ -85,6 +87,7 @@ export async function listInstagramPosts(req: Request, res: Response) {
 
       where.instagramAccountId = instagramAccountId;
     } else {
+      // 1️⃣ tenta conta ativa
       const user = await prisma.user.findUnique({
         where: { id: userId },
         select: { activeInstagramAccountId: true },
@@ -92,6 +95,17 @@ export async function listInstagramPosts(req: Request, res: Response) {
 
       if (user?.activeInstagramAccountId) {
         where.instagramAccountId = user.activeInstagramAccountId;
+      } else {
+        // 2️⃣ fallback: última conta conectada
+        const fallback = await prisma.instagramAccount.findFirst({
+          where: { userId, isConnected: true },
+          orderBy: { updatedAt: "desc" },
+          select: { id: true },
+        });
+
+        if (fallback) {
+          where.instagramAccountId = fallback.id;
+        }
       }
     }
 

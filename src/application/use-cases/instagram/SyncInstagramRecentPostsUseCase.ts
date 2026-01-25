@@ -36,6 +36,12 @@ export type SyncRecentPostsResult = {
 };
 
 export class SyncInstagramRecentPostsUseCase {
+  // ✅ respeita .env / .env.test
+  // Ex.: em testes => http://127.0.0.1:4111
+  private readonly graphBaseUrl = (
+    process.env.INSTAGRAM_GRAPH_BASE_URL ?? "https://graph.facebook.com/v21.0"
+  ).replace(/\/+$/, "");
+
   async execute(params: SyncRecentPostsParams): Promise<SyncRecentPostsResult> {
     const userId = s(params.userId);
     if (!userId) throw new Error("userId é obrigatório");
@@ -49,7 +55,8 @@ export class SyncInstagramRecentPostsUseCase {
     });
 
     const desiredAccountId =
-      s(params.instagramAccountId ?? "") || s(user?.activeInstagramAccountId ?? "");
+      s(params.instagramAccountId ?? "") ||
+      s(user?.activeInstagramAccountId ?? "");
 
     const account =
       (desiredAccountId
@@ -63,37 +70,45 @@ export class SyncInstagramRecentPostsUseCase {
         orderBy: { updatedAt: "desc" },
       }));
 
-    if (!account) throw new Error("Conta do Instagram não encontrada");
+    if (!account) {
+      throw new Error("Conta do Instagram não encontrada");
+    }
 
     const instagramAccountIdUsed = account.id;
 
     const igUserId = s((account as any)?.igUserId);
-    const pageAccessToken = s((account as any)?.pageAccessToken);
+
+    // 🔑 AJUSTE IMPORTANTE:
+    // Em produção usamos pageAccessToken
+    // Em testes (ou contas antigas), usamos accessToken como fallback
+    const pageAccessToken =
+      s((account as any)?.pageAccessToken) || s((account as any)?.accessToken);
 
     if (!igUserId || !pageAccessToken) {
-      throw new Error("Conta IG sem igUserId/pageAccessToken. Refaça a conexão.");
+      throw new Error("Conta IG sem igUserId/token válido. Refaça a conexão.");
     }
 
-    // Graph API: últimos posts (media)
-    // OBS: vamos salvar a thumb em `thumb`:
-    // - preferimos `thumbnail_url` (quando vier, geralmente em vídeos/reels)
-    // - senão usamos `media_url` (imagem/capa)
-    const base = `https://graph.facebook.com/v21.0/${encodeURIComponent(igUserId)}`;
+    // ✅ Graph API: últimos posts
     const fields =
       "id,caption,media_type,media_url,permalink,timestamp,thumbnail_url";
-    const url =
-      `${base}/media` +
-      `?fields=${encodeURIComponent(fields)}` +
-      `&limit=${limit}` +
-      `&access_token=${encodeURIComponent(pageAccessToken)}`;
 
-    const r = await axios.get(url, { timeout: 15000 });
+    // ✅ base configurável (fake server em testes)
+    // /{igUserId}/media
+    const url = `${this.graphBaseUrl}/${encodeURIComponent(igUserId)}/media`;
+
+    const r = await axios.get(url, {
+      params: {
+        fields,
+        limit,
+        access_token: pageAccessToken,
+      },
+      timeout: 15000,
+    });
+
     const body = r.data as IgMediaResponse;
     const items = Array.isArray(body?.data) ? body.data : [];
 
     if (items.length === 0) {
-      // opcionalmente, se deleteOldBeyondLimit=true, você pode limpar tudo,
-      // mas normalmente é melhor não deletar se o Graph retornou vazio.
       return {
         ok: true,
         instagramAccountIdUsed,
@@ -103,18 +118,16 @@ export class SyncInstagramRecentPostsUseCase {
       };
     }
 
-    // Upsert dos últimos N
     let upserted = 0;
 
     for (const it of items) {
       const igMediaId = s(it.id);
       if (!igMediaId) continue;
 
-      // publishedAt é obrigatório no seu schema
       const publishedAt =
         it.timestamp && !Number.isNaN(new Date(it.timestamp).getTime())
           ? new Date(it.timestamp)
-          : new Date(); // fallback seguro (não deveria acontecer)
+          : new Date();
 
       const thumb = s(it.thumbnail_url) || s(it.media_url) || null;
 
@@ -129,16 +142,12 @@ export class SyncInstagramRecentPostsUseCase {
           userId,
           instagramAccountId: instagramAccountIdUsed,
           igMediaId,
-
           mediaType: it.media_type ?? null,
           publishedAt,
           caption: it.caption ?? null,
           permalink: it.permalink ?? null,
-
-          // se quiser, pode manter 0 e atualizar depois com outro endpoint/job de métricas por post
           likeCount: 0,
           commentsCount: 0,
-
           thumb,
         },
         update: {
@@ -153,7 +162,6 @@ export class SyncInstagramRecentPostsUseCase {
       upserted++;
     }
 
-    // manter o banco leve: apaga tudo que não estiver nesses últimos N
     let deletedOld = 0;
     if (deleteOldBeyondLimit) {
       const keep = items.map((x) => s(x.id)).filter(Boolean);

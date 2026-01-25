@@ -11,15 +11,16 @@ import { instagramRouter } from "./routes/instagram.routes";
 import { youtubeRouter } from "./routes/youtube.routes";
 import metricsRoutes from "./routes/metrics.routes";
 
-// ✅ backfill router (já estava)
 import instagramBackfillRoutes from "./routes/instagramBackfill.routes";
-
-// ✅ NOVO: posts sync router (era isso que causava 404)
 import instagramPostsRoutes from "./routes/instagramPosts.routes";
 
 import { authMiddleware } from "./middlewares/authMiddleware";
 
 export const app = express();
+
+/* =========================
+   Middlewares básicos
+========================= */
 
 app.use(corsMiddleware);
 
@@ -30,43 +31,62 @@ app.options(/.*/, (_req, res) => {
 app.use(express.json({ limit: "2mb" }));
 app.use(cookieParser());
 
-app.get("/", (_req, res) => {
-  res.redirect("/swagger");
-});
+/* =========================
+   Health / Root
+========================= */
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
 });
 
+if (process.env.NODE_ENV !== "test") {
+  app.get("/", (_req, res) => {
+    res.redirect("/swagger");
+  });
+}
+
 /* =========================
    Routes
 ========================= */
 
+// Auth
 app.use("/api/auth", authRouter);
 
-// ✅ Instagram (base)
+// Instagram base (login, connect etc — pode ficar sem auth)
 app.use("/api/instagram", instagramRouter);
 
-// ✅ Instagram Backfill
-app.use("/api/instagram", instagramBackfillRoutes);
+// 🔒 Instagram Backfill (PRECISA DE AUTH)
+app.use(
+  "/api/instagram",
+  authMiddleware,
+  instagramBackfillRoutes
+);
 
-// ✅ Instagram Posts (sync etc.)  <--- FIX do 404
-app.use("/api/instagram", instagramPostsRoutes);
+// 🔒 Instagram Posts (sync, list etc — PRECISA DE AUTH)
+app.use(
+  "/api/instagram",
+  authMiddleware,
+  instagramPostsRoutes
+);
 
-// ✅ YouTube
+// YouTube
 app.use("/api/youtube", youtubeRouter);
 
-// ✅ Metrics (protegido)
+// Metrics
 app.use("/api/metrics", authMiddleware, metricsRoutes);
 
 /* =========================
    Swagger
 ========================= */
-setupSwagger(app);
+
+if (process.env.NODE_ENV !== "test") {
+  setupSwagger(app);
+}
 
 /* =========================
    404 handler
 ========================= */
+
 app.use((req, res) => {
   res.status(404).json({
     message: "Rota não encontrada",
@@ -78,6 +98,7 @@ app.use((req, res) => {
 /* =========================
    Error handler
 ========================= */
+
 app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
   const status = Number(err?.statusCode || err?.status || 500);
 

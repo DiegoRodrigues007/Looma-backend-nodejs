@@ -178,10 +178,12 @@ model InstagramAccountDailyMetrics {
 
   day DateTime @db.Date
 
-  followers         Int @default(0)
-  profileViewsTotal Int @default(0)
-  reach             Int @default(0)
-  totalInteractions Int @default(0)
+  // ✅ Followers diário NÃO é backfillável de forma confiável.
+  // ✅ Deixa nullable para não poluir série com “números loucos”.
+  followers         Int?
+  profileViewsTotal Int  @default(0)
+  reach             Int  @default(0)
+  totalInteractions Int  @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -279,6 +281,10 @@ model InstagramBackfillJob {
   userId             String
   instagramAccountId String
 
+  // ✅ período do job (pro worker saber o que buscar)
+  from DateTime @db.Date
+  to   DateTime @db.Date
+
   status String  @default("queued")
   cursor String?
 
@@ -289,6 +295,9 @@ model InstagramBackfillJob {
   finishedAt DateTime?
   lastError  String?
 
+  // ✅ chave para não duplicar job (resolve seu TS e evita spam de jobs)
+  dedupeKey String @unique
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -297,5 +306,6 @@ model InstagramBackfillJob {
 
   @@index([userId, status, createdAt])
   @@index([instagramAccountId, status, createdAt])
+  @@index([instagramAccountId, from, to])
   @@map("InstagramBackfillJobs")
 }

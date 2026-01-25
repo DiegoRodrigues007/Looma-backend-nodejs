@@ -9,17 +9,43 @@ import { startInstagramBackfillWorker } from "../../infrastructure/jobs/Instagra
 import { runInstagramDailySnapshotsJob } from "../../infrastructure/jobs/instagramDailySnapshotsJob";
 import { startInstagramAccountDailyMetricsCron } from "../../infrastructure/jobs/InstagramAccountDailyMetricsCron";
 
-function isTrue(v?: string) {
-  return String(v ?? "false").toLowerCase() === "true";
+/**
+ * ✅ Ajustes feitos:
+ * - padroniza bool/env parsing (evita "TRUE", "1", "yes" etc. não pegar)
+ * - não inicia CRON se JOBS_ENABLED=false
+ * - controla InstagramAccountDailyMetricsCron por env (pra você ligar/desligar)
+ * - adiciona logs claros do que está realmente ligado
+ * - garante TZ padrão (se você quiser) sem quebrar produção
+ */
+
+const DEFAULT_TZ = "America/Sao_Paulo";
+
+function isTrue(v?: string): boolean {
+  const s = String(v ?? "").trim().toLowerCase();
+  return s === "true" || s === "1" || s === "yes" || s === "y" || s === "on";
 }
 
-function isJobsEnabled() {
-  // default: true (mantém seu comportamento atual)
-  return String(process.env.JOBS_ENABLED ?? "true").toLowerCase() === "true";
+function isFalse(v?: string): boolean {
+  const s = String(v ?? "").trim().toLowerCase();
+  return s === "false" || s === "0" || s === "no" || s === "n" || s === "off";
 }
 
-function n(v: any, fallback: number, min?: number, max?: number) {
-  const x = Number(v);
+function envBool(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  if (isTrue(raw)) return true;
+  if (isFalse(raw)) return false;
+  return fallback;
+}
+
+function envNum(
+  name: string,
+  fallback: number,
+  min?: number,
+  max?: number,
+): number {
+  const raw = process.env[name];
+  const x = Number(raw);
   const val = Number.isFinite(x) ? x : fallback;
   if (typeof min === "number" && val < min) return min;
   if (typeof max === "number" && val > max) return max;
@@ -28,22 +54,60 @@ function n(v: any, fallback: number, min?: number, max?: number) {
 
 function logBootConfig() {
   console.log(`🚀 API running at http://localhost:${env.port}`);
-  console.log(`🌐 FRONTEND_URL runtime = ${process.env.FRONTEND_URL}`);
-  console.log(`🕒 TZ = ${process.env.TZ ?? "not set"}`);
+  console.log(`🕒 TZ = ${process.env.TZ ?? "(not set)"} (default=${DEFAULT_TZ})`);
 
-  console.log("⚙️ Jobs config:", {
-    JOBS_ENABLED: process.env.JOBS_ENABLED ?? "true",
-    DAILY_METRICS_SNAPSHOT_ENABLED:
-      process.env.DAILY_METRICS_SNAPSHOT_ENABLED ?? "false",
-    IG_SNAPSHOTS_RUN_ON_BOOT: process.env.IG_SNAPSHOTS_RUN_ON_BOOT ?? "false",
-    IG_BACKFILL_ENABLED: process.env.IG_BACKFILL_ENABLED ?? "false",
+  console.log("🌐 Front URLs (env):", {
+    FRONT_URL: process.env.FRONT_URL ?? "(not set)",
+    FRONTEND_URL: process.env.FRONTEND_URL ?? "(not set)",
+    IG_RETURN_PATH: process.env.IG_RETURN_PATH ?? "(not set)",
+  });
+
+  console.log("⚡ In-process backfill (env):", {
+    ENABLE_INPROCESS_BACKFILL: process.env.ENABLE_INPROCESS_BACKFILL ?? "(not set)",
+    INPROCESS_BACKFILL_CONCURRENCY: process.env.INPROCESS_BACKFILL_CONCURRENCY ?? "(not set)",
+  });
+
+  console.log("⚙️ Jobs config (env):", {
+    JOBS_ENABLED: process.env.JOBS_ENABLED ?? "(default true)",
+    DAILY_METRICS_SNAPSHOT_ENABLED: process.env.DAILY_METRICS_SNAPSHOT_ENABLED ?? "(default false)",
+    IG_SNAPSHOTS_RUN_ON_BOOT: process.env.IG_SNAPSHOTS_RUN_ON_BOOT ?? "(default false)",
+    IG_ACCOUNT_DAILY_METRICS_CRON_ENABLED:
+      process.env.IG_ACCOUNT_DAILY_METRICS_CRON_ENABLED ?? "(default true)",
+
+    IG_BACKFILL_ENABLED: process.env.IG_BACKFILL_ENABLED ?? "(default false)",
+    IG_BACKFILL_POLL_MS: process.env.IG_BACKFILL_POLL_MS ?? "(default 1500)",
+    IG_BACKFILL_MAX_PARALLEL_JOBS: process.env.IG_BACKFILL_MAX_PARALLEL_JOBS ?? "(default 1)",
+    IG_BACKFILL_CONCURRENCY: process.env.IG_BACKFILL_CONCURRENCY ?? "(default 1)",
+    IG_BACKFILL_ALWAYS_REFETCH_LAST_DAYS:
+      process.env.IG_BACKFILL_ALWAYS_REFETCH_LAST_DAYS ?? "(default 7)",
+  });
+
+  console.log("🪵 Debug flags (env):", {
+    IG_DEBUG_LOGS: process.env.IG_DEBUG_LOGS ?? "(not set)",
+    IG_DEBUG: process.env.IG_DEBUG ?? "(not set)",
+  });
+
+  console.log("✅ [ENV CHECK] resolved booleans:", {
+    jobsEnabled: envBool("JOBS_ENABLED", true),
+    dailyMetricsSnapshot: envBool("DAILY_METRICS_SNAPSHOT_ENABLED", false),
+    igDailyRunOnBoot: envBool("IG_SNAPSHOTS_RUN_ON_BOOT", false),
+    igAccountDailyCron: envBool("IG_ACCOUNT_DAILY_METRICS_CRON_ENABLED", true),
+    igBackfillWorkerEnabled: envBool("IG_BACKFILL_ENABLED", false),
+    inprocessBackfillEnabled: envBool("ENABLE_INPROCESS_BACKFILL", false),
   });
 }
 
 app.listen(env.port, () => {
+  // ✅ opcional: se não setou TZ, define default (não sobrescreve se já existe)
+  if (!process.env.TZ) {
+    process.env.TZ = DEFAULT_TZ;
+  }
+
   logBootConfig();
 
-  if (!isJobsEnabled()) {
+  const jobsEnabled = envBool("JOBS_ENABLED", true);
+
+  if (!jobsEnabled) {
     console.log("⏸️ Jobs disabled (JOBS_ENABLED=false)");
     return;
   }
@@ -53,35 +117,38 @@ app.listen(env.port, () => {
    * 1) Daily Metrics Snapshot
    * ===========================
    */
-  if (isTrue(process.env.DAILY_METRICS_SNAPSHOT_ENABLED)) {
+  if (envBool("DAILY_METRICS_SNAPSHOT_ENABLED", false)) {
     startDailyMetricsSnapshotJob();
     console.log("📊 DailyMetricsSnapshotJob started");
   } else {
-    console.log(
-      "⏸️ DailyMetricsSnapshotJob disabled (DAILY_METRICS_SNAPSHOT_ENABLED=false)"
-    );
+    console.log("⏸️ DailyMetricsSnapshotJob disabled (DAILY_METRICS_SNAPSHOT_ENABLED=false)");
   }
 
   /**
    * ======================================
    * 2) InstagramAccountDailyMetrics CRON
    * ======================================
+   * ✅ agora dá pra desligar via env
    */
-  startInstagramAccountDailyMetricsCron();
-  console.log("⏰ InstagramAccountDailyMetrics CRON started");
+  if (envBool("IG_ACCOUNT_DAILY_METRICS_CRON_ENABLED", true)) {
+    startInstagramAccountDailyMetricsCron();
+    console.log("⏰ InstagramAccountDailyMetrics CRON started");
+  } else {
+    console.log(
+      "⏸️ InstagramAccountDailyMetrics CRON disabled (IG_ACCOUNT_DAILY_METRICS_CRON_ENABLED=false)",
+    );
+  }
 
   /**
    * ======================================
    * 3) IG Daily Snapshots run on boot
    * ======================================
    */
-  if (isTrue(process.env.IG_SNAPSHOTS_RUN_ON_BOOT)) {
+  if (envBool("IG_SNAPSHOTS_RUN_ON_BOOT", false)) {
     runInstagramDailySnapshotsJob()
-      .then((r) =>
-        console.log("✅ [IG DAILY METRICS] runOnBoot completed:", r)
-      )
+      .then((r) => console.log("✅ [IG DAILY METRICS] runOnBoot completed:", r))
       .catch((e: any) =>
-        console.error("❌ [IG DAILY METRICS] runOnBoot failed:", e?.message ?? e)
+        console.error("❌ [IG DAILY METRICS] runOnBoot failed:", e?.message ?? e),
       );
   } else {
     console.log("⏸️ IG daily snapshots runOnBoot disabled (IG_SNAPSHOTS_RUN_ON_BOOT=false)");
@@ -91,31 +158,12 @@ app.listen(env.port, () => {
    * ===========================
    * 4) Instagram Backfill Worker
    * ===========================
-   *
-   * ✅ IMPORTANTE:
-   * - Agora o worker consome jobs do BANCO (instagramBackfillJob status=queued)
-   * - Então os params "maxPosts/maxPages/delays" não são mais usados aqui.
-   *   (Eles eram do worker antigo em memória).
-   *
-   * Se você quiser controlar limite/delay, isso precisa ser implementado dentro do
-   * RunInstagramBackfillUseCase (ou dentro do provider que chama a API do Instagram).
    */
-  if (isTrue(process.env.IG_BACKFILL_ENABLED)) {
-    // Permite override via env sem quebrar seu código
-    const pollMs = n(process.env.IG_BACKFILL_POLL_MS, 1500, 100, 60_000);
-    const maxParallelJobs = n(
-      process.env.IG_BACKFILL_MAX_PARALLEL_JOBS,
-      1,
-      1,
-      5
-    );
-    const concurrency = n(process.env.IG_BACKFILL_CONCURRENCY, 1, 1, 10);
-    const alwaysRefetchLastDays = n(
-      process.env.IG_BACKFILL_ALWAYS_REFETCH_LAST_DAYS,
-      7,
-      0,
-      60
-    );
+  if (envBool("IG_BACKFILL_ENABLED", false)) {
+    const pollMs = envNum("IG_BACKFILL_POLL_MS", 1500, 100, 60_000);
+    const maxParallelJobs = envNum("IG_BACKFILL_MAX_PARALLEL_JOBS", 1, 1, 5);
+    const concurrency = envNum("IG_BACKFILL_CONCURRENCY", 1, 1, 10);
+    const alwaysRefetchLastDays = envNum("IG_BACKFILL_ALWAYS_REFETCH_LAST_DAYS", 7, 0, 60);
 
     startInstagramBackfillWorker({
       pollMs,
@@ -131,8 +179,6 @@ app.listen(env.port, () => {
       alwaysRefetchLastDays,
     });
   } else {
-    console.log(
-      "⏸️ Instagram Backfill Worker disabled (IG_BACKFILL_ENABLED=false)"
-    );
+    console.log("⏸️ Instagram Backfill Worker disabled (IG_BACKFILL_ENABLED=false)");
   }
 });

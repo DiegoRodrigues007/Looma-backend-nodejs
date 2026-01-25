@@ -40,7 +40,6 @@ function getUserIdFromReq(req: any): string | null {
   return null;
 }
 
-
 /**
  * =========================
  * OPENAPI COMPONENTS
@@ -251,6 +250,50 @@ instagramRouter.get("/start", authMiddleware, async (req, res) => {
 });
 
 /**
+* =========================
+* 🔁 TOKEN REFRESH (ADICIONADO)
+* =========================
+*/
+
+
+/**
+* @openapi
+* /api/instagram/refresh:
+* post:
+* tags:
+* - Instagram
+* summary: Renova o token do Instagram quando expirado.
+* description: >
+* Tenta renovar o token de acesso. Caso falhe, sinaliza necessidade de reautenticação.
+* security:
+* - bearerAuth: []
+* responses:
+* 200:
+* description: Token renovado com sucesso.
+* 400:
+* description: Erro controlado no refresh.
+* 401:
+* description: Não autenticado.
+* 403:
+* description: Reautenticação necessária.
+* 501:
+* description: Controller.refresh não implementado.
+*/
+instagramRouter.post("/refresh", authMiddleware, async (req, res) => {
+res.setHeader("Cache-Control", "no-store");
+
+
+if (typeof controller.refresh !== "function") {
+return res
+.status(501)
+.json({ ok: false, message: "Controller.refresh não implementado" });
+}
+
+
+await controller.refresh(req, res);
+});
+
+/**
  * @openapi
  * /api/instagram/callback:
  *   get:
@@ -385,7 +428,11 @@ instagramRouter.get("/active", authMiddleware, async (req, res) => {
     });
 
     if (!first) {
-      return res.json({ ok: true, activeInstagramAccountId: null, account: null });
+      return res.json({
+        ok: true,
+        activeInstagramAccountId: null,
+        account: null,
+      });
     }
 
     try {
@@ -451,7 +498,11 @@ instagramRouter.get("/active", authMiddleware, async (req, res) => {
     });
 
     if (!fallback) {
-      return res.json({ ok: true, activeInstagramAccountId: null, account: null });
+      return res.json({
+        ok: true,
+        activeInstagramAccountId: null,
+        account: null,
+      });
     }
 
     try {
@@ -950,142 +1001,6 @@ instagramRouter.get("/metrics", authMiddleware, async (req, res) => {
   }
 
   await controller.metrics(req, res);
-});
-
-/**
- * =========================
- * POSTS (DB-first)
- * =========================
- */
-
-/**
- * @openapi
- * /api/instagram/posts:
- *   get:
- *     tags:
- *       - Instagram
- *     summary: Lista posts do Instagram (DB-first), filtrando pela conta ativa.
- *     description: >
- *       Retorna posts do banco. Se houver conta ativa definida no usuário, filtra por instagramAccountId automaticamente.
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: query
- *         name: from
- *         schema:
- *           type: string
- *           example: "2026-01-01"
- *         required: false
- *         description: Data inicial (YYYY-MM-DD) baseada em publishedAt.
- *       - in: query
- *         name: to
- *         schema:
- *           type: string
- *           example: "2026-01-19"
- *         required: false
- *         description: Data final (YYYY-MM-DD) baseada em publishedAt.
- *       - in: query
- *         name: type
- *         schema:
- *           type: string
- *           example: "IMAGE"
- *         required: false
- *         description: Filtra por mediaType (ex.: IMAGE, VIDEO, CAROUSEL).
- *       - in: query
- *         name: limit
- *         schema:
- *           type: integer
- *           minimum: 1
- *           maximum: 200
- *           example: 50
- *         required: false
- *         description: Limite de resultados (default 50, max 200).
- *     responses:
- *       200:
- *         description: Lista de posts retornada com sucesso.
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/InstagramPostsResponse'
- *       401:
- *         description: Não autenticado.
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
- *       501:
- *         description: Model InstagramPost ainda não existe no Prisma.
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
- */
-instagramRouter.get("/posts", authMiddleware, async (req, res) => {
-  res.setHeader("Cache-Control", "no-store");
-
-  const anyPrisma = prisma as any;
-  if (!anyPrisma.instagramPost) {
-    return res.status(501).json({
-      ok: false,
-      message:
-        "Model InstagramPost ainda não existe no Prisma. Crie os models (InstagramPost/InstagramPostMetric) e rode a migration.",
-    });
-  }
-
-  const userId = getUserIdFromReq(req);
-  if (!userId) {
-    return res.status(401).json({ ok: false, message: "Não autenticado" });
-  }
-
-  const user = await prisma.user.findUnique({
-    where: { id: String(userId) },
-    select: { activeInstagramAccountId: true },
-  });
-
-  const activeInstagramAccountId = user?.activeInstagramAccountId ?? null;
-
-  const from = typeof req.query.from === "string" ? req.query.from.trim() : "";
-  const to = typeof req.query.to === "string" ? req.query.to.trim() : "";
-  const type = typeof req.query.type === "string" ? req.query.type.trim() : "";
-  const limitRaw =
-    typeof req.query.limit === "string" ? Number(req.query.limit) : undefined;
-  const limit = Number.isFinite(limitRaw)
-    ? Math.min(200, Math.max(1, limitRaw!))
-    : 50;
-
-  const where: any = { userId: String(userId) };
-
-  if (activeInstagramAccountId) {
-    where.instagramAccountId = activeInstagramAccountId;
-  }
-
-  if (type) where.mediaType = type;
-
-  if (from || to) {
-    where.publishedAt = {};
-    if (from) where.publishedAt.gte = parseYmdToUtcStart(from);
-    if (to) where.publishedAt.lte = parseYmdToUtcEnd(to);
-  }
-
-  const posts = await anyPrisma.instagramPost.findMany({
-    where,
-    orderBy: { publishedAt: "desc" },
-    take: limit,
-    include: {
-      metrics: {
-        orderBy: { pulledAt: "desc" },
-        take: 1,
-      },
-    },
-  });
-
-  return res.json({
-    ok: true,
-    source: "database",
-    activeInstagramAccountId,
-    total: posts.length,
-    posts,
-  });
 });
 
 export default instagramRouter;

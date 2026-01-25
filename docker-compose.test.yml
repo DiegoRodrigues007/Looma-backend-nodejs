@@ -1,0 +1,22 @@
+version: "3.8"
+
+services:
+  postgres_test:
+    image: postgres:15-alpine
+    container_name: looma_postgres_test
+    environment:
+      POSTGRES_USER: looma_test
+      POSTGRES_PASSWORD: looma_test
+      POSTGRES_DB: looma_test
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U looma_test -d looma_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    volumes:
+      - looma_pg_test_data:/var/lib/postgresql/data
+
+volumes:
+  looma_pg_test_data:

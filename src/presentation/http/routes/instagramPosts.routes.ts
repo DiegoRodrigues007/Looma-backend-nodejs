@@ -21,10 +21,25 @@ function getAuthenticatedUserId(req: Request): string | null {
 }
 
 function parseLimit(req: Request, fallback = 20, max = 50) {
-  const raw = typeof req.query.limit === "string" ? Number(req.query.limit) : NaN;
+  const raw =
+    typeof req.query.limit === "string" ? Number(req.query.limit) : NaN;
   if (Number.isFinite(raw)) return Math.min(max, Math.max(1, Math.floor(raw)));
   return fallback;
 }
+
+/** Heurística: detecta erro vindo do provider (Meta) */
+function looksLikeProviderError(err: any) {
+  const msg = String(err?.message ?? "");
+  // axios pode jogar "Request failed with status code 4xx/5xx"
+  if (err?.isAxiosError) return true;
+  if (/status code/i.test(msg)) return true;
+  if (/ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN/i.test(msg)) return true;
+  return false;
+}
+
+/** =========================
+ *  Swagger - Posts list
+ *  ========================= */
 
 /**
  * @openapi
@@ -81,6 +96,10 @@ function parseLimit(req: Request, fallback = 20, max = 50) {
  */
 router.get("/posts", authMiddleware, listInstagramPosts);
 
+/** =========================
+ *  Swagger - Posts sync
+ *  ========================= */
+
 /**
  * @openapi
  * /api/instagram/posts/sync:
@@ -104,36 +123,73 @@ router.get("/posts", authMiddleware, listInstagramPosts);
  *         description: Sincronização concluída
  *       401:
  *         description: Não autorizado
+ *       400:
+ *         description: Requisição inválida
+ *       404:
+ *         description: Conta do Instagram não encontrada/ativa
+ *       502:
+ *         description: Erro ao chamar o provider (Meta)
  *       500:
  *         description: Erro interno
  */
-router.post("/posts/sync", authMiddleware, async (req: Request, res: Response) => {
-  try {
-    res.setHeader("Cache-Control", "no-store");
+router.post(
+  "/posts/sync",
+  authMiddleware,
+  async (req: Request, res: Response) => {
+    try {
+      res.setHeader("Cache-Control", "no-store");
 
-    const userId = getAuthenticatedUserId(req);
-    if (!userId) {
-      return res.status(401).json({ ok: false, message: "Não autenticado" });
+      const userId = getAuthenticatedUserId(req);
+      if (!userId) {
+        return res.status(401).json({ ok: false, message: "Não autenticado" });
+      }
+
+      const limit = parseLimit(req, 20, 50);
+
+      const useCase = new SyncInstagramRecentPostsUseCase();
+
+      const result = await useCase.execute({
+        userId,
+        limit,
+        deleteOldBeyondLimit: true,
+      });
+
+      // força 200 explicitamente (pra ficar consistente nos testes)
+      return res.status(200).json(result);
+    } catch (error: any) {
+      const msg = String(error?.message ?? error);
+
+      // ✅ Erros esperados do domínio/use-case => não pode ser 500
+      // Ajuste as strings aqui conforme suas mensagens reais do use-case
+      if (/userId é obrigatório/i.test(msg)) {
+        return res.status(400).json({ ok: false, message: msg });
+      }
+
+      if (/Conta do Instagram não encontrada/i.test(msg)) {
+        return res.status(404).json({ ok: false, message: msg });
+      }
+
+      if (/Conta IG sem igUserId\/pageAccessToken/i.test(msg)) {
+        return res.status(400).json({ ok: false, message: msg });
+      }
+
+      // ✅ erro de provider (Meta/axios) => 502 (bad gateway)
+      if (looksLikeProviderError(error)) {
+        return res.status(502).json({
+          ok: false,
+          message: "Falha ao consultar a Meta",
+          detail: msg,
+        });
+      }
+
+      // fallback 500 (erro inesperado)
+      return res.status(500).json({
+        ok: false,
+        message: "Falha ao sincronizar posts",
+        detail: msg,
+      });
     }
-
-    const limit = parseLimit(req, 20, 50);
-
-    const useCase = new SyncInstagramRecentPostsUseCase();
-
-    const result = await useCase.execute({
-      userId,
-      limit,
-      deleteOldBeyondLimit: true,
-    });
-
-    return res.json(result);
-  } catch (error: any) {
-    return res.status(500).json({
-      ok: false,
-      message: "Falha ao sincronizar posts",
-      detail: String(error?.message ?? error),
-    });
   }
-});
+);
 
 export default router;

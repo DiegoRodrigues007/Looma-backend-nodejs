@@ -3,8 +3,9 @@ import axios from "axios";
 import { prisma } from "../../../infrastructure/db/prismaClient";
 import { listDays, ymd } from "../../../shared/date/instagramDateUtils";
 import { toFiniteNumber } from "../../../domain/metrics/instagram/instagramInsightsMapper";
+import { MetricsPlatform, type InstagramAccountDailyMetrics } from "@prisma/client";
 
-function s(v: any): string {
+function s(v: unknown): string {
   return String(v ?? "").trim();
 }
 
@@ -22,7 +23,7 @@ function clampRangeDays(from: string, to: string, maxDays = 92) {
 type IgInsightsResponse = {
   data?: Array<{
     name?: string;
-    values?: Array<{ value?: any; end_time?: string }>;
+    values?: Array<{ value?: unknown; end_time?: string }>;
   }>;
 };
 
@@ -34,28 +35,33 @@ function pickInsightValueByMetric(
   const row = rows.find((r) => String(r?.name ?? "") === metricName);
   const v0 = row?.values?.[0]?.value;
 
-  const parseAny = (v: any, depth = 0): number => {
+  const parseAny = (v: unknown, depth = 0): number => {
     if (depth > 6) return 0;
+
     if (typeof v === "number") return Number.isFinite(v) ? v : 0;
     if (typeof v === "string") return Number(v) || 0;
 
     if (v && typeof v === "object") {
-      if ("total_value" in v) return parseAny((v as any).total_value, depth + 1);
-      if ("value" in v) return parseAny((v as any).value, depth + 1);
-      const tv = (v as any)?.total_value?.value;
+      const obj = v as Record<string, unknown>;
+
+      if ("total_value" in obj) return parseAny(obj.total_value, depth + 1);
+      if ("value" in obj) return parseAny(obj.value, depth + 1);
+
+      const tv = (obj as any)?.total_value?.value;
       if (tv !== undefined) return parseAny(tv, depth + 1);
     }
+
     return 0;
   };
 
   return parseAny(v0);
 }
 
-function isRowAllZero(r: any): boolean {
+function isRowAllZero(r: InstagramAccountDailyMetrics | null | undefined): boolean {
   if (!r) return true;
-  const reach = toFiniteNumber(r?.reach);
-  const pv = toFiniteNumber(r?.profileViewsTotal);
-  const ti = toFiniteNumber(r?.totalInteractions);
+  const reach = toFiniteNumber(r.reach);
+  const pv = toFiniteNumber(r.profileViewsTotal);
+  const ti = toFiniteNumber(r.totalInteractions);
   return reach === 0 && pv === 0 && ti === 0;
 }
 
@@ -78,6 +84,10 @@ async function runPromisePool<T>(
   await Promise.allSettled(runners);
 }
 
+/**
+ * ✅ Agora esse fetch NÃO busca follower_count no insights (isso bagunça).
+ * Ele só busca métricas diárias (reach/profile_views/total_interactions).
+ */
 async function fetchDailyInsightsFromGraph(params: {
   igUserId: string;
   pageAccessToken: string;
@@ -85,7 +95,6 @@ async function fetchDailyInsightsFromGraph(params: {
 }): Promise<{
   reach: number;
   profileViews: number;
-  followers: number;
   totalInteractions: number;
 }> {
   const igUserId = s(params.igUserId);
@@ -98,14 +107,16 @@ async function fetchDailyInsightsFromGraph(params: {
 
   const base = `https://graph.facebook.com/v21.0/${encodeURIComponent(igUserId)}`;
 
+  // ✅ reach por dia
   const insightsUrlA =
     `${base}/insights` +
-    `?metric=reach,follower_count` +
+    `?metric=reach` +
     `&period=day` +
     `&since=${sinceTs}` +
     `&until=${untilTs}` +
     `&access_token=${encodeURIComponent(token)}`;
 
+  // ✅ profile_views + total_interactions (total_value)
   const insightsUrlB =
     `${base}/insights` +
     `?metric=profile_views,total_interactions` +
@@ -119,17 +130,18 @@ async function fetchDailyInsightsFromGraph(params: {
   let insightsB: IgInsightsResponse | null = null;
 
   try {
-    const rA = await axios.get(insightsUrlA, { timeout: 15000 });
-    insightsA = rA.data as IgInsightsResponse;
-  } catch (e: any) {
-    const graphError = e?.response?.data?.error;
-    const msg = String(graphError?.message ?? e?.message ?? "Erro Graph A");
+    const rA = await axios.get<IgInsightsResponse>(insightsUrlA, { timeout: 15000 });
+    insightsA = rA.data;
+  } catch (e: unknown) {
+    const err = e as any;
+    const graphError = err?.response?.data?.error;
+    const msg = String(graphError?.message ?? err?.message ?? "Erro Graph A");
     throw new Error(`Graph /insights(A) falhou (${day}): ${msg}`);
   }
 
   try {
-    const rB = await axios.get(insightsUrlB, { timeout: 15000 });
-    insightsB = rB.data as IgInsightsResponse;
+    const rB = await axios.get<IgInsightsResponse>(insightsUrlB, { timeout: 15000 });
+    insightsB = rB.data;
   } catch {
     insightsB = { data: [] };
   }
@@ -140,10 +152,6 @@ async function fetchDailyInsightsFromGraph(params: {
   }
 
   const reach = toFiniteNumber(pickInsightValueByMetric(insightsA, "reach"));
-  let followers = toFiniteNumber(
-    pickInsightValueByMetric(insightsA, "follower_count")
-  );
-
   const profileViews = toFiniteNumber(
     pickInsightValueByMetric(insightsB, "profile_views")
   );
@@ -151,20 +159,31 @@ async function fetchDailyInsightsFromGraph(params: {
     pickInsightValueByMetric(insightsB, "total_interactions")
   );
 
-  if (!followers) {
-    const meUrl =
-      `${base}` +
-      `?fields=followers_count` +
-      `&access_token=${encodeURIComponent(token)}`;
-    try {
-      const me = await axios.get(meUrl, { timeout: 15000 });
-      followers = toFiniteNumber((me.data as any)?.followers_count);
-    } catch {
-      followers = 0;
-    }
-  }
+  return { reach, profileViews, totalInteractions };
+}
 
-  return { reach, profileViews, followers, totalInteractions };
+/**
+ * ✅ Followers TOTAL real (snapshot do "agora")
+ * Usa /{igUserId}?fields=followers_count
+ */
+async function fetchFollowersCountNow(params: {
+  igUserId: string;
+  pageAccessToken: string;
+}): Promise<number> {
+  const igUserId = s(params.igUserId);
+  const token = s(params.pageAccessToken);
+
+  const url =
+    `https://graph.facebook.com/v21.0/${encodeURIComponent(igUserId)}` +
+    `?fields=followers_count` +
+    `&access_token=${encodeURIComponent(token)}`;
+
+  try {
+    const r = await axios.get<{ followers_count?: number }>(url, { timeout: 15000 });
+    return toFiniteNumber(r.data?.followers_count);
+  } catch {
+    return 0;
+  }
 }
 
 /* =========================
@@ -175,11 +194,11 @@ export type RunInstagramBackfillParams = {
   userId: string;
   instagramAccountId?: string | null; // se não vier, pega active ou primeira conectada
   from: string; // YYYY-MM-DD
-  to: string;   // YYYY-MM-DD
-  force?: boolean;       // se true, refaz todos os dias do range
+  to: string; // YYYY-MM-DD
+  force?: boolean; // se true, refaz todos os dias do range
   refillZeros?: boolean; // se true, refaz dias zerados
   alwaysRefetchLastDays?: number; // default 7
-  concurrency?: number;  // default 2
+  concurrency?: number; // default 2
 };
 
 export type RunInstagramBackfillResult = {
@@ -190,10 +209,14 @@ export type RunInstagramBackfillResult = {
   fetchedDays: number;
   errorsCount: number;
   errorsPreview: Array<{ day: string; message: string }>;
+  // ✅ extra: snapshot gravado
+  followersSnapshot?: { day: string; followers: number };
 };
 
 export class RunInstagramBackfillUseCase {
-  async execute(params: RunInstagramBackfillParams): Promise<RunInstagramBackfillResult> {
+  async execute(
+    params: RunInstagramBackfillParams
+  ): Promise<RunInstagramBackfillResult> {
     const userId = s(params.userId);
     const from = s(params.from).slice(0, 10);
     const to = s(params.to).slice(0, 10);
@@ -219,7 +242,8 @@ export class RunInstagramBackfillUseCase {
       select: { activeInstagramAccountId: true },
     });
 
-    const desiredAccountId = s(params.instagramAccountId ?? "") || s(user?.activeInstagramAccountId ?? "");
+    const desiredAccountId =
+      s(params.instagramAccountId ?? "") || s(user?.activeInstagramAccountId ?? "");
 
     const account =
       (desiredAccountId
@@ -236,8 +260,10 @@ export class RunInstagramBackfillUseCase {
     if (!account) throw new Error("Conta do Instagram não encontrada");
 
     const instagramAccountIdUsed = account.id;
-    const igUserId = s((account as any)?.igUserId);
-    const pageAccessToken = s((account as any)?.pageAccessToken);
+
+    // ✅ sem any
+    const igUserId = s(account.igUserId);
+    const pageAccessToken = s(account.pageAccessToken);
 
     if (!igUserId || !pageAccessToken) {
       throw new Error("Conta IG sem igUserId/pageAccessToken. Refaça a conexão.");
@@ -259,7 +285,7 @@ export class RunInstagramBackfillUseCase {
       orderBy: { day: "asc" },
     });
 
-    const byDayExisting = new Map<string, any>();
+    const byDayExisting = new Map<string, InstagramAccountDailyMetrics>();
     for (const r of existing) byDayExisting.set(ymd(r.day), r);
 
     const daysToFetch = force
@@ -283,6 +309,8 @@ export class RunInstagramBackfillUseCase {
           dayYmd,
         });
 
+        // ✅ IMPORTANTÍSSIMO:
+        // followers NÃO é salvo aqui mais.
         await prisma.instagramAccountDailyMetrics.upsert({
           where: {
             instagramAccountId_day: {
@@ -294,13 +322,14 @@ export class RunInstagramBackfillUseCase {
             userId,
             instagramAccountId: instagramAccountIdUsed,
             day: dateOnlyUtcFromYmd(dayYmd),
-            followers: toFiniteNumber(g.followers),
+            followers: null,
             profileViewsTotal: toFiniteNumber(g.profileViews),
             reach: toFiniteNumber(g.reach),
             totalInteractions: toFiniteNumber(g.totalInteractions),
           },
           update: {
-            followers: toFiniteNumber(g.followers),
+            // mantém followers como null pra não “poluir”
+            followers: null,
             profileViewsTotal: toFiniteNumber(g.profileViews),
             reach: toFiniteNumber(g.reach),
             totalInteractions: toFiniteNumber(g.totalInteractions),
@@ -308,9 +337,42 @@ export class RunInstagramBackfillUseCase {
         });
 
         fetchedDays++;
-      } catch (e: any) {
-        errors.push({ day: dayYmd, message: String(e?.message ?? "erro") });
+      } catch (e: unknown) {
+        const err = e as any;
+        errors.push({ day: dayYmd, message: String(err?.message ?? "erro") });
       }
+    });
+
+    // ✅ Snapshot de followers (TOTAL real) para o dia "safeTo"
+    const followersNow = await fetchFollowersCountNow({
+      igUserId,
+      pageAccessToken,
+    });
+
+    const snapshotDate = dateOnlyUtcFromYmd(safeTo);
+
+    await prisma.metricsSnapshot.upsert({
+      where: {
+        userId_platform_date: {
+          userId,
+          platform: MetricsPlatform.instagram,
+          date: snapshotDate,
+        },
+      },
+      create: {
+        userId,
+        platform: MetricsPlatform.instagram,
+        date: snapshotDate,
+        followers: Math.trunc(toFiniteNumber(followersNow)),
+        // opcional: você pode preencher esses também se quiser
+        reach: 0,
+        totalInteractions: 0,
+        engagementRate: 0,
+      },
+      update: {
+        followers: Math.trunc(toFiniteNumber(followersNow)),
+      },
+      select: { followers: true },
     });
 
     return {
@@ -321,6 +383,7 @@ export class RunInstagramBackfillUseCase {
       fetchedDays,
       errorsCount: errors.length,
       errorsPreview: errors.slice(0, 10),
+      followersSnapshot: { day: safeTo, followers: Math.trunc(toFiniteNumber(followersNow)) },
     };
   }
 }
