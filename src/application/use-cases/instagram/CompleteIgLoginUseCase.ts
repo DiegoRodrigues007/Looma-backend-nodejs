@@ -1,3 +1,4 @@
+// src/application/use-cases/instagram/CompleteIgLoginUseCase.ts
 import { randomBytes, createHash } from "crypto";
 import {
   IInstagramIgLoginAuthService,
@@ -75,10 +76,10 @@ function s(v: any): string {
   return String(v ?? "").trim();
 }
 
-function isValidSource(
-  v: any
-): v is InstagramCandidateDTO["source"] {
-  return v === "instagram_business_account" || v === "connected_instagram_account";
+function isValidSource(v: any): v is InstagramCandidateDTO["source"] {
+  return (
+    v === "instagram_business_account" || v === "connected_instagram_account"
+  );
 }
 
 function normalizeCandidateDTO(c: any): InstagramCandidateDTO {
@@ -92,7 +93,7 @@ function normalizeCandidateDTO(c: any): InstagramCandidateDTO {
     facebookPageName: c?.facebookPageName ? s(c.facebookPageName) : undefined,
     source: isValidSource(sourceRaw)
       ? sourceRaw
-      : "instagram_business_account", // fallback seguro (ou ajuste se preferir lançar erro)
+      : "instagram_business_account", // fallback seguro
   };
 }
 
@@ -105,12 +106,9 @@ function normalizeCandidateDTO(c: any): InstagramCandidateDTO {
 function normalizeCandidateForDb(c: any): InstagramCandidateForDb {
   const sourceRaw = c?.source;
 
-  const pageAccessToken =
-    s(c?.pageAccessToken) ||
-    s(c?.page_access_token) ||
-    s(c?.access_token);
+  const pageAccessToken = s(c?.pageAccessToken) || s(c?.page_access_token) || s(c?.access_token);
 
-  return {
+  const out: InstagramCandidateForDb = {
     igUserId: s(c?.igUserId),
     username: s(c?.username),
     accountType: s(c?.accountType),
@@ -121,6 +119,17 @@ function normalizeCandidateForDb(c: any): InstagramCandidateForDb {
       : "instagram_business_account",
     pageAccessToken, // ✅ obrigatório no DB
   };
+
+  // ✅ Segurança pro fluxo real: já falha cedo se não veio token de página
+  if (!out.pageAccessToken) {
+    throw new Error(
+      `pageAccessToken vazio no candidate (igUserId=${out.igUserId} pageId=${out.facebookPageId}). ` +
+        "Sem token da página não é possível usar endpoints do Instagram Graph. " +
+        "Isso normalmente indica falta de permissão de páginas, seleção de páginas no consentimento, ou a API não retornou access_token."
+    );
+  }
+
+  return out;
 }
 
 function keyOf(igUserId: string, facebookPageId: string) {
@@ -141,6 +150,15 @@ export class CompleteIgLoginUseCase {
   private static readonly ttlMs = Number(
     process.env.IG_LOGIN_CHOOSE_TTL_MS ?? 10 * 60 * 1000
   );
+
+  /**
+   * ✅ quando só existe 1 candidate, podemos persistir direto no callback
+   * (isso destrava teu teste "callback deve salvar conta" e melhora UX).
+   * Default: true
+   */
+  private static readonly autoConfirmSingle =
+    String(process.env.IG_LOGIN_AUTO_CONFIRM_SINGLE ?? "true").toLowerCase() !==
+    "false";
 
   private static cleanupExpired() {
     const now = Date.now();
@@ -178,110 +196,14 @@ export class CompleteIgLoginUseCase {
     return pending;
   }
 
-  async execute(
-    code: string,
-    state: string,
-    userId: string
-  ): Promise<InstagramLoginChooseRequired | InstagramLoginReauthRequired | InstagramLoginOk> {
-    if (!code || s(code).length === 0) throw new Error("code é obrigatório");
-    if (!userId || s(userId).length === 0) throw new Error("userId é obrigatório");
-
-    CompleteIgLoginUseCase.cleanupExpired();
-
-    const { shortToken } = await this.auth.exchangeCodeForShortToken(code);
-    const { longToken, expiresAt } = await this.auth.exchangeShortForLong(shortToken);
-
-    const resolved: InstagramAuthResolved | InstagramAuthReauthRequired =
-      await this.auth.resolveMeOrReauth(longToken);
-
-    if (resolved.status === "reauth_required") {
-      return {
-        status: "reauth_required",
-        loginUrl: resolved.loginUrl,
-        missingPermissions: resolved.missingPermissions,
-      };
-    }
-
-    const candidatesRaw = resolved.candidates ?? [];
-    if (!candidatesRaw.length) {
-      throw new Error(
-        "Nenhuma conta do Instagram foi encontrada para este login. " +
-          "Verifique se o Instagram é Professional (Business/Creator) e está vinculado a uma Página do Facebook " +
-          "que o usuário autenticado consegue acessar."
-      );
-    }
-
-    // ✅ lista “pública” (sem token)
-    const candidatesPublic: InstagramCandidateDTO[] = candidatesRaw.map(normalizeCandidateDTO);
-
-    const selectionId = CompleteIgLoginUseCase.createSelectionId(s(userId));
-
-    // ✅ pendência com token (pra persistir/confirmar depois)
-    const pending: PendingSelection = {
-      userId: s(userId),
-      longToken: s(longToken),
-      expiresAt: expiresAt ?? null,
-      createdAt: Date.now(),
-      candidates: candidatesRaw.map(normalizeCandidateForDb),
-    };
-
-    CompleteIgLoginUseCase.pending.set(selectionId, pending);
-
-    return {
-      status: "choose_required",
-      selectionId,
-      candidates: candidatesPublic,
-    };
-  }
-
-  /**
-   * ✅ COMPAT: o seu controller estava chamando esse nome.
-   * Retorna o pending inteiro (inclui longToken/expiresAt e candidates com pageAccessToken).
-   */
-  getPendingForPersist(params: { selectionId: string; userId: string }): PendingSelection {
-    const selectionId = s(params.selectionId);
-    const userId = s(params.userId);
-    if (!selectionId) throw new Error("selectionId é obrigatório");
-    if (!userId) throw new Error("userId é obrigatório");
-
-    return CompleteIgLoginUseCase.assertPendingOrThrow(selectionId, userId);
-  }
-
-  /** ✅ candidates para persistir no banco (COM pageAccessToken) */
-  getCandidatesForDb(params: { selectionId: string; userId: string }): InstagramCandidateForDb[] {
-    const pending = this.getPendingForPersist(params);
-    return pending.candidates;
-  }
-
-  getCandidates(params: { selectionId: string; userId: string }): InstagramCandidateDTO[] {
-    const pending = this.getPendingForPersist(params);
-
-    return pending.candidates.map((c) => ({
-      igUserId: c.igUserId,
-      username: c.username,
-      accountType: c.accountType,
-      facebookPageId: c.facebookPageId,
-      facebookPageName: c.facebookPageName,
-      source: c.source,
-    }));
-  }
-
-  async confirmSelection(params: {
-    selectionId: string;
+  private async persistSelections(params: {
     userId: string;
+    pending: PendingSelection;
     selections: InstagramConfirmSelectionInput;
   }): Promise<InstagramLoginResult[]> {
-    const selectionId = s(params.selectionId);
     const userId = s(params.userId);
+    const pending = params.pending;
     const selections = params.selections;
-
-    if (!selectionId) throw new Error("selectionId é obrigatório");
-    if (!userId) throw new Error("userId é obrigatório");
-    if (!Array.isArray(selections) || selections.length === 0) {
-      throw new Error("Selecione ao menos uma conta para conectar");
-    }
-
-    const pending = CompleteIgLoginUseCase.assertPendingOrThrow(selectionId, userId);
 
     const byKey = new Map<string, PendingSelection["candidates"][number]>();
     for (const c of pending.candidates) {
@@ -346,6 +268,151 @@ export class CompleteIgLoginUseCase {
         pageAccessToken,
       });
     }
+
+    return results;
+  }
+
+  async execute(
+    code: string,
+    state: string,
+    userId: string
+  ): Promise<InstagramLoginChooseRequired | InstagramLoginReauthRequired | InstagramLoginOk> {
+    if (!code || s(code).length === 0) throw new Error("code é obrigatório");
+    if (!userId || s(userId).length === 0) throw new Error("userId é obrigatório");
+
+    // state pode ser validado no controller (cookie/assinatura). Aqui só evita lint:
+    void state;
+
+    CompleteIgLoginUseCase.cleanupExpired();
+
+    const { shortToken } = await this.auth.exchangeCodeForShortToken(code);
+    const { longToken, expiresAt } = await this.auth.exchangeShortForLong(shortToken);
+
+    // ✅ Não depender do nome exato do tipo exportado do port (evita quebra por rename)
+    const resolved = (await this.auth.resolveMeOrReauth(longToken)) as
+      | InstagramAuthResolved
+      | InstagramAuthReauthRequired
+      | {
+          status: "reauth_required";
+          loginUrl: string;
+          missingPermissions: string[];
+        }
+      | {
+          status: "ok";
+          candidates: any[];
+        };
+
+    if ((resolved as any).status === "reauth_required") {
+      return {
+        status: "reauth_required",
+        loginUrl: (resolved as any).loginUrl,
+        missingPermissions: (resolved as any).missingPermissions ?? [],
+      };
+    }
+
+    const candidatesRaw = ((resolved as any).candidates ?? []) as any[];
+    if (!candidatesRaw.length) {
+      throw new Error(
+        "Nenhuma conta do Instagram foi encontrada para este login. " +
+          "Verifique se o Instagram é Professional (Business/Creator) e está vinculado a uma Página do Facebook " +
+          "que o usuário autenticado consegue acessar."
+      );
+    }
+
+    // ✅ pendência com token (pra persistir/confirmar depois)
+    const pending: PendingSelection = {
+      userId: s(userId),
+      longToken: s(longToken),
+      expiresAt: expiresAt ?? null,
+      createdAt: Date.now(),
+      candidates: candidatesRaw.map(normalizeCandidateForDb),
+    };
+
+    // ✅ UX + TEST: se só tem 1 candidate, persiste direto e retorna OK
+    if (CompleteIgLoginUseCase.autoConfirmSingle && pending.candidates.length === 1) {
+      const only = pending.candidates[0];
+
+      await this.persistSelections({
+        userId: pending.userId,
+        pending,
+        selections: [{ igUserId: only.igUserId, facebookPageId: only.facebookPageId }],
+      });
+
+      return { status: "ok" };
+    }
+
+    // ✅ lista “pública” (sem token)
+    const candidatesPublic: InstagramCandidateDTO[] = candidatesRaw.map(
+      normalizeCandidateDTO
+    );
+
+    const selectionId = CompleteIgLoginUseCase.createSelectionId(s(userId));
+    CompleteIgLoginUseCase.pending.set(selectionId, pending);
+
+    return {
+      status: "choose_required",
+      selectionId,
+      candidates: candidatesPublic,
+    };
+  }
+
+  /**
+   * ✅ COMPAT: o seu controller estava chamando esse nome.
+   * Retorna o pending inteiro (inclui longToken/expiresAt e candidates com pageAccessToken).
+   */
+  getPendingForPersist(params: { selectionId: string; userId: string }): PendingSelection {
+    const selectionId = s(params.selectionId);
+    const userId = s(params.userId);
+    if (!selectionId) throw new Error("selectionId é obrigatório");
+    if (!userId) throw new Error("userId é obrigatório");
+
+    return CompleteIgLoginUseCase.assertPendingOrThrow(selectionId, userId);
+  }
+
+  /** ✅ candidates para persistir no banco (COM pageAccessToken) */
+  getCandidatesForDb(params: { selectionId: string; userId: string }): InstagramCandidateForDb[] {
+    const pending = this.getPendingForPersist(params);
+    return pending.candidates;
+  }
+
+  getCandidates(params: { selectionId: string; userId: string }): InstagramCandidateDTO[] {
+    const pending = this.getPendingForPersist(params);
+
+    return pending.candidates.map((c) => ({
+      igUserId: c.igUserId,
+      username: c.username,
+      accountType: c.accountType,
+      facebookPageId: c.facebookPageId,
+      facebookPageName: c.facebookPageName,
+      source: c.source,
+    }));
+  }
+
+  async confirmSelection(params: {
+    selectionId: string;
+    userId: string;
+    selections: InstagramConfirmSelectionInput;
+  }): Promise<InstagramLoginResult[]> {
+    const selectionId = s(params.selectionId);
+    const userId = s(params.userId);
+    const selections = params.selections;
+
+    if (!selectionId) throw new Error("selectionId é obrigatório");
+    if (!userId) throw new Error("userId é obrigatório");
+    if (!Array.isArray(selections) || selections.length === 0) {
+      throw new Error("Selecione ao menos uma conta para conectar");
+    }
+
+    // ✅ garante que TTL é aplicado mesmo se alguém ficar chamando confirm depois de muito tempo
+    CompleteIgLoginUseCase.cleanupExpired();
+
+    const pending = CompleteIgLoginUseCase.assertPendingOrThrow(selectionId, userId);
+
+    const results = await this.persistSelections({
+      userId,
+      pending,
+      selections,
+    });
 
     CompleteIgLoginUseCase.pending.delete(selectionId);
     return results;

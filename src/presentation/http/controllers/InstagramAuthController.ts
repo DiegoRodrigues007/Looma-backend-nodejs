@@ -1,4 +1,3 @@
-// src/presentation/http/controllers/InstagramAuthController.ts
 import { Request, Response } from "express";
 import crypto from "crypto";
 import axios from "axios";
@@ -23,14 +22,6 @@ import {
   type InstagramTimeseriesPoint,
 } from "../../../domain/metrics/windows/metricsWindows";
 
-/**
- * ✅ Ajustes (sem quebrar seu fluxo):
- * - Normaliza parsing de query/body (sem "any" solto)
- * - Evita refresh/backfill travar request (fallback safe)
- * - Não envia headers duas vezes (safeJson/safeRedirect)
- * - Não retorna 0 “fake” quando não tem dado (kpis continua vindo)
- */
-
 const ENABLE_INPROCESS_BACKFILL =
   String(process.env.ENABLE_INPROCESS_BACKFILL ?? "").toLowerCase() === "true";
 
@@ -45,16 +36,19 @@ const FRONT_URL = String(
 
 const IG_RETURN_PATH = String(process.env.IG_RETURN_PATH ?? "/settings");
 
-// ✅ por padrão: use DB job (worker). In-process só se você pedir.
 const PREFER_DB_BACKFILL =
   String(process.env.PREFER_DB_BACKFILL ?? "true").toLowerCase() === "true";
 
-/* =========================
-   Small helpers
-========================= */
-
 function s(v: unknown): string {
   return String(v ?? "").trim();
+}
+
+// ✅ Normaliza DateTime defensivamente (caso algum legado devolva string)
+function safeDate(v: unknown): Date | null {
+  if (!v) return null;
+  if (v instanceof Date) return v;
+  const d = new Date(String(v));
+  return Number.isFinite(d.getTime()) ? d : null;
 }
 
 type AuthUserLike = {
@@ -64,13 +58,12 @@ type AuthUserLike = {
 };
 
 function getAuthenticatedUserId(req: Request): string | null {
-  // Express Request não conhece req.user por padrão
   const anyReq = req as Request & { user?: AuthUserLike; userId?: unknown };
 
   const v =
-    anyReq?.user?.userId || // ✅ UUID do banco (PRIORIDADE)
+    anyReq?.user?.userId ||
     anyReq?.user?.id ||
-    anyReq?.user?.sub || // ⚠️ pode ser id externo
+    anyReq?.user?.sub ||
     anyReq?.userId ||
     req.header("x-user-id") ||
     null;
@@ -697,7 +690,6 @@ export class InstagramAuthController {
       return safeJson(res, 500, { ok: false, message: err?.message ?? "Erro no login IG" });
     }
   }
-  
 
   async candidates(req: Request, res: Response) {
     res.setHeader("Cache-Control", "no-store");
@@ -717,10 +709,27 @@ export class InstagramAuthController {
       selectionId = s(last?.selectionId);
     }
 
+    // ✅ AJUSTE NECESSÁRIO (segurança): NÃO retornar pageAccessToken pro front
+    // O front consegue confirmar usando igUserId ou candidateId.
     const rows = await prisma.instagramCandidate.findMany({
       where: { userId: s(userId), ...(selectionId ? { selectionId } : {}) },
       orderBy: candidatesOrderBy(),
       take: 50,
+      select: {
+        id: true,
+        userId: true,
+        selectionId: true,
+        igUserId: true,
+        username: true,
+        accountType: true,
+        facebookPageId: true,
+        facebookPageName: true,
+        source: true,
+        instagramAccountId: true,
+        createdAt: true,
+        selectedAt: true,
+        // pageAccessToken: ❌ não expor
+      } as any,
     });
 
     return safeJson(res, 200, {
@@ -855,6 +864,55 @@ export class InstagramAuthController {
       });
     }
 
+    // ✅ selections pro UseCase (ele injeta accessToken/expiresAt e valida token de página)
+    const selections = selected
+      .map((c) => ({
+        igUserId: s(c.igUserId),
+        facebookPageId: s(c.facebookPageId),
+      }))
+      .filter((x) => x.igUserId && x.facebookPageId);
+
+    if (selections.length === 0) {
+      return safeJson(res, 400, {
+        ok: false,
+        code: "INVALID_INPUT",
+        message: "Candidatos selecionados não têm igUserId/facebookPageId válidos.",
+      });
+    }
+
+    let results: Array<{
+      igUserId: string;
+      username: string;
+      accountType: string;
+      accessToken: string;
+      expiresAt?: Date | string | null;
+      facebookPageId?: string | null;
+      pageAccessToken?: string | null;
+    }> = [];
+
+    try {
+      results = await this.completeLogin.confirmSelection({
+        selectionId,
+        userId: s(userId),
+        selections,
+      });
+    } catch (e) {
+      const err = e as { message?: string };
+      return safeJson(res, 400, {
+        ok: false,
+        code: "INVALID_INPUT",
+        message: s(err?.message ?? "Falha ao confirmar seleção"),
+      });
+    }
+
+    if (!results.length) {
+      return safeJson(res, 400, {
+        ok: false,
+        code: "INVALID_INPUT",
+        message: "Falha ao confirmar seleção (resultado vazio).",
+      });
+    }
+
     const createdOrUpdated: Array<{
       id: string;
       igUserId: string;
@@ -866,25 +924,32 @@ export class InstagramAuthController {
       expiresAt: Date | null;
     }> = [];
 
-    for (const c of selected) {
-      const igUserId = s(c.igUserId);
-      const facebookPageId = s(c.facebookPageId);
-      const pageAccessToken = s(c.pageAccessToken);
+    // ✅ Upsert no instagramAccount (mantém seu fluxo e garante tokens)
+    for (const r of results) {
+      const igUserId = s(r.igUserId);
+      const facebookPageId = s(r.facebookPageId);
+      const pageAccessToken = s(r.pageAccessToken);
+      const accessToken = s(r.accessToken);
 
-      if (!igUserId || !facebookPageId || !pageAccessToken) continue;
+      if (!igUserId || !facebookPageId || !pageAccessToken || !accessToken) continue;
 
       const existing = await prisma.instagramAccount.findFirst({
         where: { userId: s(userId), igUserId },
         select: { id: true },
       });
 
-      const dataToSet = {
+      // ✅ Normaliza expiresAt antes de salvar (evita Prisma reclamar se vier string)
+      const expiresAt = safeDate(r.expiresAt);
+
+      const dataToSet: any = {
         userId: s(userId),
         igUserId,
         facebookPageId,
         pageAccessToken,
-        username: c.username ?? null,
-        accountType: c.accountType ?? null,
+        accessToken, // ✅ agora salva também o LONG token do usuário
+        expiresAt,
+        username: r.username ? s(r.username) : null,
+        accountType: r.accountType ? s(r.accountType) : null,
         isConnected: true,
       };
 
@@ -934,7 +999,7 @@ export class InstagramAuthController {
       return safeJson(res, 400, {
         ok: false,
         code: "INVALID_INPUT",
-        message: "Candidatos selecionados não têm dados válidos (igUserId/pageAccessToken).",
+        message: "Contas confirmadas não puderam ser persistidas (tokens inválidos/ausentes).",
       });
     }
 
@@ -1312,7 +1377,7 @@ export class InstagramAuthController {
 
     // 1) tenta daily do último dia do range (POR CONTA)
     const dayToRow = byDayExisting.get(safeTo);
-    const dailyFollowersTo = toFiniteNumber(dayToRow?.followers);
+    const dailyFollowersTo = toFiniteNumber((dayToRow as any)?.followers);
 
     if (dailyFollowersTo > 0) {
       followersSnapshot = dailyFollowersTo;
@@ -1322,7 +1387,7 @@ export class InstagramAuthController {
     // 2) delta (POR CONTA): tenta daily do dia anterior
     const prevDay = addDaysYmd(safeTo, -1);
     const prevDayRow = byDayExisting.get(prevDay);
-    const dailyFollowersPrev = toFiniteNumber(prevDayRow?.followers);
+    const dailyFollowersPrev = toFiniteNumber((prevDayRow as any)?.followers);
 
     if (dailyFollowersPrev > 0) {
       prevFollowers = dailyFollowersPrev;
@@ -1448,7 +1513,7 @@ export class InstagramAuthController {
             refillZeros,
           });
           backfillQueued = true;
-          backfillJobId = job.id;
+          backfillJobId = (job as any).id ?? null;
         } catch (e) {
           const err = e as { message?: string };
           console.error("[IG][BACKFILL][ENQUEUE] failed", {

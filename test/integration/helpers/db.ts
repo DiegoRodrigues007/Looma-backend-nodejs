@@ -1,18 +1,30 @@
-import { prisma } from "../../../src/infrastructure/db/prismaClient";
+// test/integration/helpers/db.ts
+import type { PrismaClient } from "@prisma/client";
 
-export async function truncateAllTables() {
-  // pega todas as tabelas do schema public
-  const rows = await prisma.$queryRawUnsafe<
-    Array<{ tablename: string }>
-  >(`
+/**
+ * Trunca todas as tabelas do schema public (exceto _prisma_migrations).
+ * ✅ Postgres only
+ * ✅ RESTART IDENTITY + CASCADE
+ */
+export async function truncateAllTables(prisma: PrismaClient): Promise<void> {
+  const rows = await prisma.$queryRawUnsafe<Array<{ tablename: string }>>(`
     SELECT tablename
     FROM pg_tables
     WHERE schemaname = 'public'
       AND tablename <> '_prisma_migrations'
   `);
 
-  if (!rows.length) return;
+  const tables = (rows ?? [])
+    .map((r) => String(r?.tablename ?? "").trim())
+    .filter(Boolean);
 
-  const tables = rows.map((r) => `"public"."${r.tablename}"`).join(", ");
-  await prisma.$executeRawUnsafe(`TRUNCATE TABLE ${tables} RESTART IDENTITY CASCADE;`);
+  if (tables.length === 0) return;
+
+  const quoted = tables
+    .map((t) => `"public"."${t.replace(/"/g, '""')}"`)
+    .join(", ");
+
+  await prisma.$executeRawUnsafe(
+    `TRUNCATE TABLE ${quoted} RESTART IDENTITY CASCADE;`
+  );
 }

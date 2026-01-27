@@ -1,13 +1,13 @@
+// test/integration.setup.ts (ou o nome do seu setup de integração)
 import { prisma } from "../../src/infrastructure/db/prismaClient";
 import { truncateAllTables } from "./helpers/db";
 
-// Se você quiser rodar migrate automaticamente toda vez:
-// - Recomendo rodar manualmente: npx prisma migrate deploy
-// - Se quiser automatizar aqui, dá pra usar child_process.
-// Por enquanto vamos só truncar.
+// ⚠️ Importante:
+// - Integração deve usar Prisma REAL (sem jest.mock no prismaClient)
+// - Limpeza por TRUNCATE é pesada; prefira beforeEach só nos testes de integração
 
 beforeEach(async () => {
-  await truncateAllTables();
+  await truncateAllTables(prisma);
 });
 
 afterAll(async () => {

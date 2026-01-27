@@ -30,11 +30,32 @@ function parseLimit(req: Request, fallback = 20, max = 50) {
 /** Heurística: detecta erro vindo do provider (Meta) */
 function looksLikeProviderError(err: any) {
   const msg = String(err?.message ?? "");
+  const code = String(err?.code ?? "");
+
   // axios pode jogar "Request failed with status code 4xx/5xx"
   if (err?.isAxiosError) return true;
+
+  // alguns erros vêm embrulhados pelo use-case como "provider down: ..."
+  if (/provider down:/i.test(msg)) return true;
+
+  // "Request failed with status code X"
   if (/status code/i.test(msg)) return true;
-  if (/ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN/i.test(msg)) return true;
+
+  // erros de rede comuns (inclui ECONNREFUSED, que era o seu caso mais provável)
+  if (
+    /ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN/i.test(msg) ||
+    /ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN/i.test(code)
+  ) {
+    return true;
+  }
+
   return false;
+}
+
+/** Heurística: detecta erro de reauth (scopes/permissão/token) */
+function looksLikeReauthError(err: any) {
+  const msg = String(err?.message ?? "");
+  return /reauth required/i.test(msg) || /missing scopes/i.test(msg);
 }
 
 /** =========================
@@ -125,6 +146,8 @@ router.get("/posts", authMiddleware, listInstagramPosts);
  *         description: Não autorizado
  *       400:
  *         description: Requisição inválida
+ *       403:
+ *         description: Reauth necessária (permissões/scopes ausentes ou token inválido)
  *       404:
  *         description: Conta do Instagram não encontrada/ativa
  *       502:
@@ -160,7 +183,6 @@ router.post(
       const msg = String(error?.message ?? error);
 
       // ✅ Erros esperados do domínio/use-case => não pode ser 500
-      // Ajuste as strings aqui conforme suas mensagens reais do use-case
       if (/userId é obrigatório/i.test(msg)) {
         return res.status(400).json({ ok: false, message: msg });
       }
@@ -169,11 +191,22 @@ router.post(
         return res.status(404).json({ ok: false, message: msg });
       }
 
-      if (/Conta IG sem igUserId\/pageAccessToken/i.test(msg)) {
+      if (/Conta IG sem igUserId\/token válido/i.test(msg)) {
         return res.status(400).json({ ok: false, message: msg });
       }
 
+      // ✅ novo: erro de permissões/scopes => sinaliza reauth
+      // (o use-case agora lança "reauth required: ...")
+      if (looksLikeReauthError(error)) {
+        return res.status(403).json({
+          ok: false,
+          needsReauth: true,
+          message: msg,
+        });
+      }
+
       // ✅ erro de provider (Meta/axios) => 502 (bad gateway)
+      // Obs: só cai aqui se NÃO for reauth (que deve ser 403)
       if (looksLikeProviderError(error)) {
         return res.status(502).json({
           ok: false,

@@ -193,6 +193,65 @@ function getUserIdFromReq(req: any): string | null {
  *         - activeInstagramAccountId
  *         - total
  *         - posts
+ *
+ *     InstagramRefreshTokenRequest:
+ *       type: object
+ *       description: >
+ *         Payload opcional. Se instagramAccountId não vier, usa o activeInstagramAccountId do usuário.
+ *       properties:
+ *         instagramAccountId:
+ *           type: string
+ *           nullable: true
+ *         force:
+ *           type: boolean
+ *           nullable: true
+ *           description: Força refresh mesmo longe do vencimento
+ *         refreshIfExpiresBeforeMinutes:
+ *           type: integer
+ *           nullable: true
+ *           description: Janela (min) para considerar "perto do vencimento" (default 60)
+ *
+ *     InstagramRefreshTokenResponse:
+ *       oneOf:
+ *         - type: object
+ *           properties:
+ *             ok:
+ *               type: boolean
+ *               example: true
+ *             refreshed:
+ *               type: boolean
+ *             instagramAccountId:
+ *               type: string
+ *             igUserId:
+ *               type: string
+ *             expiresAt:
+ *               type: string
+ *               format: date-time
+ *               nullable: true
+ *             reason:
+ *               type: string
+ *               enum: [forced, near_expiry, not_needed]
+ *           required:
+ *             - ok
+ *             - refreshed
+ *             - instagramAccountId
+ *             - igUserId
+ *             - expiresAt
+ *             - reason
+ *         - type: object
+ *           properties:
+ *             ok:
+ *               type: boolean
+ *               example: false
+ *             code:
+ *               type: string
+ *               enum: [UNAUTHENTICATED, NOT_FOUND, NOT_CONNECTED, INVALID_INPUT]
+ *             message:
+ *               type: string
+ *           required:
+ *             - ok
+ *             - code
+ *             - message
  */
 
 /**
@@ -250,47 +309,66 @@ instagramRouter.get("/start", authMiddleware, async (req, res) => {
 });
 
 /**
-* =========================
-* 🔁 TOKEN REFRESH (ADICIONADO)
-* =========================
-*/
-
+ * =========================
+ * 🔁 TOKEN REFRESH (ADICIONADO + DOCUMENTADO)
+ * =========================
+ */
 
 /**
-* @openapi
-* /api/instagram/refresh:
-* post:
-* tags:
-* - Instagram
-* summary: Renova o token do Instagram quando expirado.
-* description: >
-* Tenta renovar o token de acesso. Caso falhe, sinaliza necessidade de reautenticação.
-* security:
-* - bearerAuth: []
-* responses:
-* 200:
-* description: Token renovado com sucesso.
-* 400:
-* description: Erro controlado no refresh.
-* 401:
-* description: Não autenticado.
-* 403:
-* description: Reautenticação necessária.
-* 501:
-* description: Controller.refresh não implementado.
-*/
+ * @openapi
+ * /api/instagram/refresh:
+ *   post:
+ *     tags:
+ *       - Instagram
+ *     summary: Renova o token do Instagram quando estiver perto de expirar (ou forçado).
+ *     description: >
+ *       Tenta renovar o *long-lived token* salvo em instagramAccount.accessToken.
+ *       Se instagramAccountId não for enviado, usa user.activeInstagramAccountId.
+ *       Caso o serviço de auth não suporte refresh, retorne erro controlado.
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/InstagramRefreshTokenRequest'
+ *     responses:
+ *       200:
+ *         description: Resultado do refresh (sucesso ou "not needed").
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/InstagramRefreshTokenResponse'
+ *       400:
+ *         description: Erro controlado no refresh (input inválido, etc).
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/InstagramRefreshTokenResponse'
+ *       401:
+ *         description: Não autenticado.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/InstagramRefreshTokenResponse'
+ *       501:
+ *         description: Controller.refresh não implementado.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ErrorResponse'
+ */
 instagramRouter.post("/refresh", authMiddleware, async (req, res) => {
-res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Cache-Control", "no-store");
 
+  if (typeof controller.refresh !== "function") {
+    return res
+      .status(501)
+      .json({ ok: false, message: "Controller.refresh não implementado" });
+  }
 
-if (typeof controller.refresh !== "function") {
-return res
-.status(501)
-.json({ ok: false, message: "Controller.refresh não implementado" });
-}
-
-
-await controller.refresh(req, res);
+  await controller.refresh(req, res);
 });
 
 /**

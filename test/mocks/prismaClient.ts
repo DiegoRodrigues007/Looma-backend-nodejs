@@ -1,24 +1,28 @@
+// test/unit/mocks/prismaClient.ts
 export const prisma = {
   user: {
+    create: jest.fn(),
     findUnique: jest.fn(),
-  },
-
-  instagramAccount: {
-    findFirst: jest.fn(),
     findMany: jest.fn(),
-  },
-
-  instagramPost: {
-    findMany: jest.fn(),
-    upsert: jest.fn(),
-    createMany: jest.fn(),
     deleteMany: jest.fn(),
   },
-
-  instagramBackfillJob: {
+  instagramAccount: {
+    create: jest.fn(),
     findFirst: jest.fn(),
     findMany: jest.fn(),
-    create: jest.fn(),
+    deleteMany: jest.fn(),
     update: jest.fn(),
   },
-};
+  instagramPost: {
+    upsert: jest.fn(),
+    findMany: jest.fn(),
+    deleteMany: jest.fn(),
+  },
+  instagramBackfillJob: {
+    create: jest.fn(),
+    findFirst: jest.fn(),
+    findMany: jest.fn(),
+    update: jest.fn(),
+    deleteMany: jest.fn(),
+  },
+} as any;

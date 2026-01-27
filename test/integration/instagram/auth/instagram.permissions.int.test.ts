@@ -2,30 +2,47 @@ import request from "supertest";
 import { app } from "../../../../src/presentation/http/app";
 import { prisma } from "../../../../src/infrastructure/db/prismaClient";
 import { makeAuthHeader } from "../../helpers/jwt";
-import { startFakeMetaServer } from "../../helpers/fakeMetaServer";
+
+async function safeDeleteMany(model: any, args: any) {
+  if (model && typeof model.deleteMany === "function") {
+    return model.deleteMany(args);
+  }
+  throw new Error(
+    `Prisma model não tem deleteMany (prisma está mockado no teste de integração?). Model keys: ${Object.keys(
+      model ?? {}
+    ).join(", ")}`
+  );
+}
 
 describe("INTEGRATION Instagram permissions (missing scopes)", () => {
-  const fakeMeta = startFakeMetaServer(4111);
-
-  beforeAll(async () => {
-    await fakeMeta.start();
-  });
-
-  afterAll(async () => {
-    await fakeMeta.stop();
-  });
+  /**
+   * ✅ IMPORTANTE:
+   * - NÃO subir fake server aqui.
+   * - NÃO setar INSTAGRAM_GRAPH_BASE_URL aqui.
+   *
+   * Isso já é responsabilidade do `test/jest.setup.integration.ts`,
+   * para garantir que a env esteja setada ANTES de importar o `app`.
+   */
 
   it("deve exigir reauth quando scopes obrigatórios estão faltando", async () => {
     const email = "diego+int-ig-scopes@looma.com";
 
-    // 🧹 limpeza defensiva
-    await prisma.instagramPost.deleteMany({
-      where: { instagramAccount: { igUserId: "IG_SCOPES" } } as any,
-    });
-    await prisma.instagramAccount.deleteMany({
-      where: { igUserId: "IG_SCOPES" } as any,
-    });
-    await prisma.user.deleteMany({ where: { email } as any });
+    // 🧹 limpeza defensiva (ordem: dependentes -> pai)
+    await safeDeleteMany(prisma.instagramBackfillJob as any, {
+      where: { user: { email } } as any,
+    }).catch(() => undefined);
+
+    await safeDeleteMany(prisma.instagramPost as any, {
+      where: { user: { email } } as any,
+    }).catch(() => undefined);
+
+    await safeDeleteMany(prisma.instagramAccount as any, {
+      where: { user: { email } } as any,
+    }).catch(() => undefined);
+
+    await safeDeleteMany(prisma.user as any, { where: { email } as any }).catch(
+      () => undefined
+    );
 
     // 1️⃣ cria usuário
     const user = await prisma.user.create({

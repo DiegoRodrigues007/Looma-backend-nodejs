@@ -1,27 +1,30 @@
 import request from "supertest";
 
-// ✅ mock local COMPLETO do axios (tem create!)
+// ✅ mock local COMPLETO do axios (tem create! + interceptors)
 jest.mock("axios", () => {
   const get = jest.fn();
   const post = jest.fn();
 
-  const instance = {
-    get,
-    post,
-    interceptors: {
-      request: { use: jest.fn() },
-      response: { use: jest.fn() },
-    },
+  const interceptors = {
+    request: { use: jest.fn(), eject: jest.fn() },
+    response: { use: jest.fn(), eject: jest.fn() },
   };
+
+  const instance = { get, post, interceptors };
+
+  const create = jest.fn(() => instance);
+
+  // Alguns lugares podem chamar axios(...) como função
+  const axiosFn: any = (..._args: any[]) => Promise.resolve({ data: undefined });
+  axiosFn.get = get;
+  axiosFn.post = post;
+  axiosFn.create = create;
+  axiosFn.interceptors = interceptors;
+  axiosFn.isAxiosError = (e: any) => !!e?.isAxiosError;
 
   return {
     __esModule: true,
-    default: {
-      get,
-      post,
-      create: jest.fn(() => instance),
-      isAxiosError: (e: any) => !!e?.isAxiosError,
-    },
+    default: axiosFn,
   };
 });
 
@@ -85,7 +88,6 @@ describe("Instagram Posts - Sync (realistic)", () => {
       .send({});
 
     if (res.status >= 500) {
-      // ajuda a diagnosticar qualquer outro 500
       // eslint-disable-next-line no-console
       console.log("SYNC 500 BODY:", res.body);
     }
@@ -101,7 +103,13 @@ describe("Instagram Posts - Sync (realistic)", () => {
 
     const [url, cfg] = (axios as any).get.mock.calls[0] ?? [];
     expect(String(url)).toMatch(/graph\.facebook|\/media/i);
-    expect(String(url)).toMatch(/access_token=/i);
+
+    // ✅ IMPORTANTE:
+    // O access_token vai em cfg.params (não na URL string)
+    expect(cfg).toBeTruthy();
+    expect(cfg?.params).toBeTruthy();
+    expect(String(cfg.params.access_token)).toMatch(/PAGE_TOKEN_1/i);
+    expect(Number(cfg.params.limit)).toBe(20);
 
     // ✅ forte: upsert foi chamado 2x
     expect(prisma.instagramPost.upsert).toHaveBeenCalled();
@@ -138,7 +146,8 @@ describe("Instagram Posts - Sync (realistic)", () => {
 
     const res = await request(app)
       .post("/api/instagram/posts/sync?limit=5")
-      .set("Authorization", makeAuthHeader("user-1"));
+      .set("Authorization", makeAuthHeader("user-1"))
+      .send({});
 
     if (res.status >= 500) {
       // eslint-disable-next-line no-console
@@ -147,6 +156,10 @@ describe("Instagram Posts - Sync (realistic)", () => {
 
     expect(res.status).toBeGreaterThanOrEqual(200);
     expect(res.status).toBeLessThan(300);
+
+    // ✅ forte: garante que repassou limit=5 pro provider
+    const [_url, cfg] = (axios as any).get.mock.calls[0] ?? [];
+    expect(Number(cfg?.params?.limit)).toBe(5);
 
     expect((prisma.instagramPost.upsert as jest.Mock).mock.calls.length).toBe(5);
   });

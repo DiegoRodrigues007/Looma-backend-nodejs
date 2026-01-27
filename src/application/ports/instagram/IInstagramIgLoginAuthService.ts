@@ -30,9 +30,7 @@ export type InstagramAuthReauthRequired = {
   missingPermissions: string[];
 };
 
-
 export interface IInstagramIgLoginAuthService {
-
   /**
    * Gera URL de login do Facebook/Instagram
    * @param state string de segurança (csrf / userId / etc)
@@ -41,23 +39,36 @@ export interface IInstagramIgLoginAuthService {
   buildLoginUrl(state: string, forceReRequest?: boolean): string;
 
   exchangeCodeForShortToken(
-    code: string
+    code: string,
   ): Promise<{
     shortToken: string;
     userId?: string | null;
   }>;
 
   exchangeShortForLong(
-    shortToken: string
+    shortToken: string,
   ): Promise<{
     longToken: string;
     expiresAt?: Date | null;
   }>;
 
+  /**
+   * ✅ Método oficial: refresh do Long-Lived Token
+   * Retorna um NOVO long token.
+   */
   refreshLongToken(longToken: string): Promise<string>;
 
+  /**
+   * ✅ Alias de compatibilidade (para use-cases antigos / nomes anteriores).
+   * Se você implementar só `refreshLongToken`, pode simplesmente fazer:
+   *   refreshLong = this.refreshLongToken.bind(this)
+   *
+   * @deprecated Use refreshLongToken(longToken)
+   */
+  refreshLong?(longToken: string): Promise<string>;
+
   resolveMeOrReauth(
-    accessToken: string
+    accessToken: string,
   ): Promise<InstagramAuthResolved | InstagramAuthReauthRequired>;
 
   getMe(accessToken: string): Promise<InstagramMe>;

@@ -1,9 +1,9 @@
 import request from "supertest";
-import { prisma } from "../mocks/prismaClient";
-import { makeAuthHeader } from "../utils/jwt";
+import { prisma } from "../../mocks/prismaClient";
+import { makeAuthHeader } from "../../utils/jwt";
 
 // ⚠️ Ajuste o import do app se necessário
-import { app } from "../../src/presentation/http/app";
+import { app } from "../../../src/presentation/http/app";
 
 describe("Backfill - Errors (realistic)", () => {
   it("POST /api/instagram/backfill/start sem auth deve retornar 401/403", async () => {
