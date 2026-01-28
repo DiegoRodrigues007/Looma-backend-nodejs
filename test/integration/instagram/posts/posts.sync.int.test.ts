@@ -1,10 +1,10 @@
 import request from "supertest";
-import { app } from "../../../src/presentation/http/app";
-import { prisma } from "../../../src/infrastructure/db/prismaClient";
+import { app } from "../../../../src/presentation/http/app";
+import { prisma } from "../../../../src/infrastructure/db/prismaClient";
 
-import { startFakeMetaServer } from "../helpers/fakeMetaServer";
-import { makeAuthHeader } from "../helpers/jwt";
-import { createActiveBusinessInstagramAccount } from "../helpers/createActiveBusinessInstagramAccount";
+import { startFakeMetaServer } from "../../helpers/fakeMetaServer";
+import { makeAuthHeader } from "../../helpers/jwt";
+import { createActiveBusinessInstagramAccount } from "../../helpers/createActiveBusinessInstagramAccount";
 
 describe("INTEGRATION /api/instagram/posts/sync", () => {
   const fakeMeta = startFakeMetaServer(4111);

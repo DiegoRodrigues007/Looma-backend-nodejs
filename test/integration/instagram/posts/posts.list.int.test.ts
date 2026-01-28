@@ -1,8 +1,8 @@
 import request from "supertest";
-import { app } from "../../../src/presentation/http/app";
-import { prisma } from "../../../src/infrastructure/db/prismaClient";
-import { startFakeMetaServer } from "../helpers/fakeMetaServer";
-import { makeAuthHeader } from "../helpers/jwt";
+import { app } from "../../../../src/presentation/http/app";
+import { prisma } from "../../../../src/infrastructure/db/prismaClient";
+import { startFakeMetaServer } from "../../helpers/fakeMetaServer";
+import { makeAuthHeader } from "../../helpers/jwt";
 
 describe("INTEGRATION /api/instagram/posts (list)", () => {
   const fakeMeta = startFakeMetaServer(4111);

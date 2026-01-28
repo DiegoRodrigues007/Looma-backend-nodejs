@@ -29,6 +29,16 @@ function pickEmailOrUserName(body: any): string | undefined {
   return value;
 }
 
+function pickName(body: any): string | undefined {
+  const raw = body?.name ?? body?.fullName ?? body?.nome;
+  if (raw === undefined || raw === null) return undefined;
+
+  const value = String(raw).trim();
+  if (!value) return undefined;
+
+  return value;
+}
+
 function generateRefreshToken() {
   return randomBytes(48).toString("hex");
 }
@@ -84,6 +94,11 @@ function refreshCookieOptions() {
   };
 }
 
+function isInvalidCredentialsMessage(msg: unknown): boolean {
+  const s = typeof msg === "string" ? msg.toLowerCase() : "";
+  return s.includes("credenciais") || s.includes("inválid") || s.includes("invalid");
+}
+
 type ReqUser = { sub: string } | undefined;
 
 export class AuthController {
@@ -94,7 +109,22 @@ export class AuthController {
   ) {}
 
   register = async (req: Request, res: Response) => {
-    const result = await this.registerUseCase.execute(req.body);
+    // ✅ validação defensiva pra não estourar 500 por .trim() em undefined
+    const email = pickEmailOrUserName(req.body);
+    const name = pickName(req.body);
+    const password = typeof req.body?.password === "string" ? req.body.password.trim() : "";
+
+    // register deve ser email de verdade
+    const isEmail = !!email && email.includes("@");
+
+    if (!isEmail || !name || !password) {
+      return res.status(400).json({ message: "Dados inválidos" });
+    }
+
+    // garante payload no formato esperado pelo UC
+    const payload = { ...req.body, email, name, password };
+
+    const result = await this.registerUseCase.execute(payload);
     if (!result.isSuccess) return res.status(400).json({ message: result.error });
 
     return res.status(201).json(result.value);
@@ -111,7 +141,15 @@ export class AuthController {
     const payload = { ...req.body, emailOrUserName, password };
 
     const result = await this.loginUseCase.execute(payload);
-    if (!result.isSuccess) return res.status(400).json({ message: result.error });
+
+    // ✅ aqui é a diferença: credenciais inválidas => 401 (seu teste espera isso)
+    if (!result.isSuccess) {
+      const msg = result.error;
+      if (isInvalidCredentialsMessage(msg)) {
+        return res.status(401).json({ message: msg });
+      }
+      return res.status(400).json({ message: msg });
+    }
 
     const accessToken = (result.value as any)?.accessToken as string | undefined;
     if (!accessToken) {
@@ -142,8 +180,7 @@ export class AuthController {
 
     res.cookie("refresh_token", refreshToken, refreshCookieOptions());
 
-    // ✅ Recomendo NÃO retornar refreshToken no body (só cookie),
-    // mas mantive sua estrutura pra não quebrar o front.
+    // ✅ Mantive refreshToken no body pra não quebrar seu front/testes.
     return res.json({
       ...result.value,
       refreshToken,

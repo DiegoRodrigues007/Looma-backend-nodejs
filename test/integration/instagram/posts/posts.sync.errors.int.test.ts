@@ -1,7 +1,7 @@
 import request from "supertest";
-import { app } from "../../../src/presentation/http/app";
-import { prisma } from "../../../src/infrastructure/db/prismaClient";
-import { makeAuthHeader } from "../helpers/jwt";
+import { app } from "../../../../src/presentation/http/app";
+import { prisma } from "../../../../src/infrastructure/db/prismaClient";
+import { makeAuthHeader } from "../../helpers/jwt";
 
 describe("INTEGRATION /api/instagram/posts/sync (errors)", () => {
   it("deve retornar 401 quando não envia Authorization", async () => {
