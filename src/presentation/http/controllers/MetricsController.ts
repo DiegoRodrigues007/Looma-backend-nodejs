@@ -1,9 +1,11 @@
+// src/presentation/http/controllers/MetricsController.ts
 import { Request, Response } from "express";
 import { MetricsService } from "../../../application/services/metrics/MetricsService";
 import { PrismaMetricsSnapshotRepository } from "../../../infrastructure/db/repositories/PrismaMetricsSnapshotRepository";
-import { MetricsPlatform, MetricsSnapshot } from "../../../domain/entities/MetricsSnapshot";
+import { MetricsPlatform } from "../../../domain/entities/MetricsSnapshot";
 import { prisma } from "../../../infrastructure/db/prismaClient";
 import { InstagramMetricsService } from "../../../infrastructure/instagram/services/InstagramMetricsService";
+import type { AxiosError } from "axios";
 
 export class MetricsController {
   // =====================================================
@@ -58,8 +60,40 @@ export class MetricsController {
     return repo.findPrevious(userId, platform, this.addDaysUTC(dayUTC, 1));
   }
 
+  /**
+   * Trata erros comuns do Graph API para respostas mais estáveis:
+   * - 429: rate limit -> 503
+   * - 400/401/403: token inválido/expirado/revogado -> 400
+   *
+   * Retorna true se já respondeu o HTTP e o caller deve "return".
+   */
+  private handleInstagramGraphError(res: Response, error: unknown): boolean {
+    const anyErr = error as any;
+
+    // AxiosError costuma expor response.status
+    const status: number | undefined =
+      (anyErr?.response?.status as number | undefined) ??
+      ((anyErr as AxiosError | undefined)?.response?.status as number | undefined);
+
+    if (status === 429) {
+      res.status(503).json({
+        message: "Instagram Graph API rate limited",
+      });
+      return true;
+    }
+
+    if (status === 400 || status === 401 || status === 403) {
+      res.status(400).json({
+        message: "Instagram token invalid, expired, or revoked",
+      });
+      return true;
+    }
+
+    return false;
+  }
+
   // =====================================================
-  // SNAPSHOT (1x POR DIA - NÃO SOBRESCREVE)
+  // SNAPSHOT (1x POR DIA - IDPOTENTE + SEGURO EM CONCORRÊNCIA)
   // =====================================================
   async instagramEnsureSnapshot(req: Request, res: Response) {
     try {
@@ -78,37 +112,45 @@ export class MetricsController {
 
       // ✅ Snapshot do DIA ATUAL (UTC) — 1x por dia
       const day = this.startOfDayUTC(new Date());
+      const dayYmd = day.toISOString().slice(0, 10);
 
       const repo = new PrismaMetricsSnapshotRepository();
 
-      // ✅ Se já existe snapshot desse dia, NÃO sobrescreve
-      const already = await repo.findByDate(userId, platform, day);
-      if (already) {
+      // ✅ Busca métricas (live) antes de salvar
+      let metrics: {
+        followers: number;
+        reach: number;
+        totalInteractions: number;
+        engagementRate: number;
+      };
+
+      try {
+        metrics = await InstagramMetricsService.fetchDailyMetrics(igUserId, accessToken);
+      } catch (err) {
+        if (this.handleInstagramGraphError(res, err)) return;
+        throw err;
+      }
+
+      /**
+       * ✅ IDPOTÊNCIA + CONCORRÊNCIA:
+       * - Não pode ser UPSERT, porque upsert sempre "salva" (cria ou atualiza)
+       * - Precisa ser CREATE-only + capturar unique violation
+       * - Assim: 1 request -> created=true (saved=true)
+       *          concorrente/segunda -> created=false (saved=false)
+       */
+      const created = await repo.createDailyIfNotExists(userId, platform, metrics, day);
+
+      if (!created) {
         return res.json({
           saved: false,
-          date: day.toISOString().slice(0, 10),
+          date: dayYmd,
           reason: "Snapshot already exists for today",
         });
       }
 
-      // ✅ Busca métricas e salva
-      const metrics = await InstagramMetricsService.fetchDailyMetrics(igUserId, accessToken);
-
-      await repo.save(
-        new MetricsSnapshot(
-          userId,
-          platform,
-          day,
-          metrics.followers,
-          metrics.reach,
-          metrics.totalInteractions,
-          metrics.engagementRate // ✅ já é percentual (ex: 5.79)
-        )
-      );
-
       return res.json({
         saved: true,
-        date: day.toISOString().slice(0, 10),
+        date: dayYmd,
       });
     } catch (error) {
       console.error(error);
@@ -120,9 +162,6 @@ export class MetricsController {
 
   // =====================================================
   // OVERVIEW (LIVE vs DIA ANTERIOR)
-  // - garante follower correto pegando a conta mais recente
-  // - compara sempre com o snapshot do "dia anterior"
-  //   (mesmo que já exista snapshot de hoje)
   // =====================================================
   async instagramOverview(req: Request, res: Response) {
     try {
@@ -139,11 +178,22 @@ export class MetricsController {
         });
       }
 
-      const live = await InstagramMetricsService.fetchDailyMetrics(igUserId, accessToken);
+      let live: {
+        followers: number;
+        reach: number;
+        totalInteractions: number;
+        engagementRate: number;
+      };
+
+      try {
+        live = await InstagramMetricsService.fetchDailyMetrics(igUserId, accessToken);
+      } catch (err) {
+        if (this.handleInstagramGraphError(res, err)) return;
+        throw err;
+      }
 
       const repo = new PrismaMetricsSnapshotRepository();
 
-      // ✅ sempre compara com o dia anterior (UTC)
       const today = this.startOfDayUTC(new Date());
       const yesterday = this.addDaysUTC(today, -1);
 
@@ -158,13 +208,13 @@ export class MetricsController {
           followers: live.followers,
           reach: live.reach,
           totalInteractions: live.totalInteractions,
-          engagementRate: live.engagementRate, // ✅ já é %
+          engagementRate: live.engagementRate,
         },
         {
           followers: previousSnapshot.followers,
           reach: previousSnapshot.reach,
           totalInteractions: previousSnapshot.totalInteractions,
-          engagementRate: previousSnapshot.engagementRate, // ✅ já é %
+          engagementRate: previousSnapshot.engagementRate,
         }
       );
 
@@ -182,8 +232,6 @@ export class MetricsController {
 
   // =====================================================
   // PERIOD (?days=7) (LIVE vs snapshot de N dias atrás)
-  // - compara com snapshot de "today - days"
-  // - se não existir exatamente, usa o mais recente <= aquele dia
   // =====================================================
   async instagramPeriod(req: Request, res: Response) {
     try {
@@ -192,8 +240,27 @@ export class MetricsController {
 
       const platform: MetricsPlatform = "instagram";
 
-      const daysRaw = Number(req.query.days ?? 7);
-      const days = Number.isFinite(daysRaw) && daysRaw > 0 ? Math.floor(daysRaw) : 7;
+      // ✅ Validação STRICT de input:
+      // - se não vier, default 7
+      // - se vier, tem que ser inteiro positivo (sem decimal/strings)
+      let days = 7;
+
+      if (req.query.days !== undefined) {
+        const raw = String(req.query.days).trim();
+
+        // permite apenas dígitos (sem sinal, sem ponto)
+        if (!/^\d+$/.test(raw)) {
+          return res.status(400).json({ message: "Invalid 'days' query param" });
+        }
+
+        const n = Number(raw);
+
+        if (!Number.isFinite(n) || n <= 0) {
+          return res.status(400).json({ message: "Invalid 'days' query param" });
+        }
+
+        days = n;
+      }
 
       const { igUserId, accessToken } = await this.getConnectedInstagramAccount(userId);
 
@@ -203,7 +270,19 @@ export class MetricsController {
         });
       }
 
-      const live = await InstagramMetricsService.fetchDailyMetrics(igUserId, accessToken);
+      let live: {
+        followers: number;
+        reach: number;
+        totalInteractions: number;
+        engagementRate: number;
+      };
+
+      try {
+        live = await InstagramMetricsService.fetchDailyMetrics(igUserId, accessToken);
+      } catch (err) {
+        if (this.handleInstagramGraphError(res, err)) return;
+        throw err;
+      }
 
       const repo = new PrismaMetricsSnapshotRepository();
 
@@ -221,13 +300,13 @@ export class MetricsController {
           followers: live.followers,
           reach: live.reach,
           totalInteractions: live.totalInteractions,
-          engagementRate: live.engagementRate, // ✅ já é %
+          engagementRate: live.engagementRate,
         },
         {
           followers: previousSnapshot.followers,
           reach: previousSnapshot.reach,
           totalInteractions: previousSnapshot.totalInteractions,
-          engagementRate: previousSnapshot.engagementRate, // ✅ já é %
+          engagementRate: previousSnapshot.engagementRate,
         }
       );
 

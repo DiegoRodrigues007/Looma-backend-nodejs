@@ -2,6 +2,7 @@
 import { Router } from "express";
 import { prisma } from "../../../infrastructure/db/prismaClient";
 import { authMiddleware } from "../middlewares/authMiddleware";
+import { Prisma } from "@prisma/client";
 
 const router = Router();
 
@@ -281,18 +282,46 @@ router.post("/backfill/start", authMiddleware, async (req, res) => {
 
   const dedupeKey = `${instagramAccountId}:${finalFrom.toISOString()}:${finalTo.toISOString()}`;
 
-  const job = await prisma.instagramBackfillJob.create({
-    data: {
-      userId,
-      instagramAccountId,
-      status: "queued",
-      from: finalFrom,
-      to: finalTo,
-      dedupeKey,
-      // se existir no schema:
-      // maxPosts,
-    },
-  });
+  // ✅ AJUSTE NECESSÁRIO: idempotência + concorrência
+  // Dois requests simultâneos podem tentar criar o mesmo dedupeKey.
+  // Nesse caso, Prisma lança P2002 (unique constraint) -> buscamos e reaproveitamos.
+  let job:
+    | Awaited<ReturnType<typeof prisma.instagramBackfillJob.create>>
+    | null = null;
+
+  try {
+    job = await prisma.instagramBackfillJob.create({
+      data: {
+        userId,
+        instagramAccountId,
+        status: "queued",
+        from: finalFrom,
+        to: finalTo,
+        dedupeKey,
+        // se existir no schema:
+        // maxPosts,
+      },
+    });
+  } catch (e: any) {
+    const isP2002 =
+      e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002";
+
+    if (isP2002) {
+      // ✅ corrida detectada: alguém já criou o job
+      const existingByKey = await prisma.instagramBackfillJob.findFirst({
+        where: { userId, dedupeKey },
+        orderBy: { createdAt: "desc" },
+      });
+
+      if (existingByKey) {
+        job = existingByKey as any;
+      }
+    }
+
+    if (!job) {
+      throw e;
+    }
+  }
 
   return res.json({
     ok: true,

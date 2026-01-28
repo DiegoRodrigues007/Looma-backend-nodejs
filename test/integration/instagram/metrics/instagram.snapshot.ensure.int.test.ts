@@ -115,4 +115,52 @@ describe("INTEGRATION POST /api/metrics/instagram/snapshot/ensure", () => {
     });
     expect(count).toBe(1);
   });
+
+  it("concorrência: dois ensures simultâneos devem criar 1 snapshot (um saved=true e outro saved=false)", async () => {
+    const user = await createTestUser("diego+snap-race@looma.com");
+    await createConnectedInstagramAccount({ userId: user.id, igUserId: "IG_RACE_1" });
+
+    const todayYmd = ymdNow();
+
+    // ✅ mock do Graph via axios.get
+    ax.get.mockImplementation(async (url: string, config?: any) => {
+      const metric = config?.params?.metric;
+
+      if (!String(url).includes("/insights")) {
+        return { data: { followers_count: 120 } };
+      }
+
+      if (metric === "reach") {
+        return { data: { data: [{ name: "reach", values: [{ value: 8000 }] }] } };
+      }
+
+      if (metric === "total_interactions") {
+        return { data: { data: [{ name: "total_interactions", total_value: { value: 250 } }] } };
+      }
+
+      return { data: { data: [] } };
+    });
+
+    const [r1, r2] = await Promise.all([
+      request(app).post("/api/metrics/instagram/snapshot/ensure").set("Authorization", makeAuthHeader(user.id)),
+      request(app).post("/api/metrics/instagram/snapshot/ensure").set("Authorization", makeAuthHeader(user.id)),
+    ]);
+
+    expect([r1.status, r2.status].sort()).toEqual([200, 200]);
+
+    // ✅ exatamente um salva e o outro detecta duplicidade
+    const savedTrueCount = [r1.body?.saved, r2.body?.saved].filter((v) => v === true).length;
+    const savedFalseCount = [r1.body?.saved, r2.body?.saved].filter((v) => v === false).length;
+
+    expect(savedTrueCount).toBe(1);
+    expect(savedFalseCount).toBe(1);
+
+    // ✅ ambos devem responder com a data do dia
+    expect([r1.body?.date, r2.body?.date]).toEqual(expect.arrayContaining([todayYmd]));
+
+    const count = await prisma.metricsSnapshot.count({
+      where: { userId: user.id, platform: "instagram" as any },
+    });
+    expect(count).toBe(1);
+  });
 });

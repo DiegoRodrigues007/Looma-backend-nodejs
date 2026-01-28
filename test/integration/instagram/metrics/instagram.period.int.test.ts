@@ -82,11 +82,11 @@ describe("INTEGRATION GET /api/metrics/instagram/period", () => {
     expect(res.status).toBe(204);
   });
 
-  it("200 com comparação live vs snapshot <= (today - days) e days inválido cai em default", async () => {
-    const user = await createTestUser("diego+period-200@looma.com");
+  it("200 com comparação live vs snapshot <= (today - days) quando days NÃO é enviado (default=7)", async () => {
+    const user = await createTestUser("diego+period-200-default@looma.com");
     await createConnectedInstagramAccount({ userId: user.id, igUserId: "IG_1" });
 
-    // today = 2026-01-10, days=7 -> target = 2026-01-03
+    // today = 2026-01-10, default days=7 -> target = 2026-01-03
     await seedMetricsSnapshots({
       userId: user.id,
       points: [{ day: "2026-01-03", followers: 70, reach: 3000, totalInteractions: 100, engagementRate: 3.33 }],
@@ -114,7 +114,7 @@ describe("INTEGRATION GET /api/metrics/instagram/period", () => {
     ax.__instance?.get?.mockImplementation(mockGraphGet);
 
     const res = await request(app)
-      .get("/api/metrics/instagram/period?days=NaN")
+      .get("/api/metrics/instagram/period") // ✅ sem days => default=7
       .set("Authorization", makeAuthHeader(user.id));
 
     expect(res.status).toBe(200);
@@ -127,5 +127,26 @@ describe("INTEGRATION GET /api/metrics/instagram/period", () => {
         engagement: expect.any(Object),
       })
     );
+  });
+
+  it("400 quando days é inválido (ex: NaN) e NÃO chama Graph API", async () => {
+    const user = await createTestUser("diego+period-400-nan@looma.com");
+    await createConnectedInstagramAccount({ userId: user.id, igUserId: "IG_1" });
+
+    // mesmo que existam snapshots, days inválido deve falhar antes
+    await seedMetricsSnapshots({
+      userId: user.id,
+      points: [{ day: "2026-01-03", followers: 70, reach: 3000, totalInteractions: 100, engagementRate: 3.33 }],
+    });
+
+    const res = await request(app)
+      .get("/api/metrics/instagram/period?days=NaN")
+      .set("Authorization", makeAuthHeader(user.id));
+
+    expect(res.status).toBe(400);
+
+    // ✅ days inválido deve “falhar cedo” e nem tentar Graph API
+    expect(ax.get).not.toHaveBeenCalled();
+    expect(ax.__instance?.get).not.toHaveBeenCalled();
   });
 });

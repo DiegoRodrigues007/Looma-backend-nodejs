@@ -23,11 +23,15 @@ export class PrismaMetricsSnapshotRepository
   }
 
   private normalizeFrom(date: Date): Date {
+    // início do dia (inclusive)
     return this.normalizeDay(date);
   }
 
   private normalizeTo(date: Date): Date {
-    return this.normalizeDay(date);
+    // fim do dia (inclusive)
+    const d = new Date(date);
+    d.setUTCHours(23, 59, 59, 999);
+    return d;
   }
 
   // =====================================================
@@ -63,7 +67,67 @@ export class PrismaMetricsSnapshotRepository
   }
 
   // =====================================================
-  // ✅ NOVO MÉTODO (USADO PELO CONTROLLER)
+  // ✅ CREATE-ONLY (IDEMPOTÊNCIA / CONCORRÊNCIA)
+  // - retorna true se criou
+  // - retorna false se já existia (unique violation)
+  // =====================================================
+  async createIfNotExists(snapshot: MetricsSnapshot): Promise<boolean> {
+    const day = this.normalizeDay(snapshot.date);
+
+    try {
+      await prisma.metricsSnapshot.create({
+        data: {
+          userId: snapshot.userId,
+          platform: snapshot.platform,
+          date: day,
+          followers: snapshot.followers,
+          reach: snapshot.reach,
+          totalInteractions: snapshot.totalInteractions,
+          engagementRate: snapshot.engagementRate,
+        },
+      });
+
+      return true;
+    } catch (err: any) {
+      // Prisma unique constraint violation
+      // (geralmente P2002)
+      if (err?.code === "P2002") return false;
+      throw err;
+    }
+  }
+
+  // =====================================================
+  // ✅ CREATE-ONLY (USADO NO ENSURE)
+  // - tenta criar 1 snapshot do dia
+  // - não atualiza se já existir
+  // =====================================================
+  async createDailyIfNotExists(
+    userId: string,
+    platform: MetricsPlatform,
+    metrics: {
+      followers: number;
+      reach: number;
+      totalInteractions: number;
+      engagementRate: number;
+    },
+    date: Date
+  ): Promise<boolean> {
+    const snapshot = new MetricsSnapshot(
+      userId,
+      platform,
+      date,
+      metrics.followers,
+      metrics.reach,
+      metrics.totalInteractions,
+      metrics.engagementRate
+    );
+
+    return this.createIfNotExists(snapshot);
+  }
+
+  // =====================================================
+  // ✅ UPSERT DAILY (MANTIDO)
+  // - útil quando você QUER atualizar o dia com dados mais novos
   // =====================================================
   async upsertDaily(
     userId: string,
