@@ -20,13 +20,20 @@ export async function authMiddleware(
   res: Response,
   next: NextFunction
 ) {
-  // ✅ TEST MODE (NODE_ENV=test)
-  // - Permite autenticar via headers x-test-user-id/x-test-email
-  // - OU via Authorization Bearer (decode sem verify) para aproveitar makeAuthHeader()
-  if (process.env.NODE_ENV === "test") {
+  const verifyInTest = process.env.AUTH_VERIFY_IN_TEST === "true";
+
+  /**
+   * =========================================================
+   * 🧪 TEST MODE (NODE_ENV=test)
+   * =========================================================
+   * - Por padrão: modo flexível (compatível com testes antigos)
+   * - Com AUTH_VERIFY_IN_TEST=true: força verificação REAL
+   */
+  if (process.env.NODE_ENV === "test" && !verifyInTest) {
     const forcedUserId = safeStr(req.header("x-test-user-id"));
     const forcedEmail = safeStr(req.header("x-test-email"));
 
+    // ✅ override explícito (test helpers)
     if (forcedUserId || forcedEmail) {
       const uid = forcedUserId || "user-1";
       const eml = forcedEmail || "test@local";
@@ -41,7 +48,7 @@ export async function authMiddleware(
 
     const token = authHeader.substring("Bearer ".length).trim();
 
-    // ✅ decode SEM validar assinatura (somente em test)
+    // ⚠️ decode SEM validar assinatura (somente em test legacy)
     const decoded = jwt.decode(token) as any;
 
     const sub =
@@ -56,7 +63,11 @@ export async function authMiddleware(
     return next();
   }
 
-  // ✅ Produção / dev: fluxo real (JWT verificado)
+  /**
+   * =========================================================
+   * 🔐 FLUXO REAL (prod / dev / test com AUTH_VERIFY_IN_TEST)
+   * =========================================================
+   */
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith("Bearer ")) {
     return res.status(401).json({ ok: false, message: "Token não informado" });
@@ -71,7 +82,9 @@ export async function authMiddleware(
     }) as any;
 
     const tokenUserId =
-      safeStr(payload?.sub) || safeStr(payload?.userId) || safeStr(payload?.id);
+      safeStr(payload?.sub) ||
+      safeStr(payload?.userId) ||
+      safeStr(payload?.id);
 
     const tokenEmail = safeStr(payload?.email);
 
@@ -81,7 +94,7 @@ export async function authMiddleware(
         .json({ ok: false, message: "Token sem identificador (sub/email)" });
     }
 
-    // ✅ Prioriza buscar por ID (sub), mas cai pra email se necessário
+    // ✅ Prioriza ID, fallback para email
     const user = tokenUserId
       ? await prisma.user.findUnique({
           where: { id: tokenUserId },
@@ -99,7 +112,7 @@ export async function authMiddleware(
     }
 
     req.user = {
-      sub: user.id, // mantém o sub consistente com o user.id
+      sub: user.id,
       email: user.email,
       userId: user.id,
     };
