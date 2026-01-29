@@ -1,6 +1,5 @@
 import request from "supertest";
 
-// ✅ mock local COMPLETO do axios (tem create!)
 jest.mock("axios", () => {
   const get = jest.fn();
   const post = jest.fn();
@@ -41,7 +40,6 @@ describe("Instagram Posts - Sync Errors (realistic)", () => {
   });
 
   it("POST /api/instagram/posts/sync deve retornar 4xx quando user não tem conta ativa (activeInstagramAccountId)", async () => {
-    // ✅ seu use-case lê user.activeInstagramAccountId
     (prisma.user.findUnique as jest.Mock).mockResolvedValue({
       activeInstagramAccountId: null,
     });
@@ -50,7 +48,6 @@ describe("Instagram Posts - Sync Errors (realistic)", () => {
       .post("/api/instagram/posts/sync?limit=20")
       .set("Authorization", makeAuthHeader("user-1"));
 
-    // depende de como sua rota trata o erro (ideal: 400/404; hoje pode virar 500)
     expect([400, 401, 404, 500]).toContain(res.status);
   });
 
@@ -73,7 +70,6 @@ describe("Instagram Posts - Sync Errors (realistic)", () => {
       activeInstagramAccountId: "ig_acc_1",
     });
 
-    // ❌ sem pageAccessToken (e/ou igUserId)
     (prisma.instagramAccount.findFirst as jest.Mock).mockResolvedValue({
       id: "ig_acc_1",
       userId: "user-1",
@@ -87,10 +83,8 @@ describe("Instagram Posts - Sync Errors (realistic)", () => {
       .post("/api/instagram/posts/sync?limit=20")
       .set("Authorization", makeAuthHeader("user-1"));
 
-    // ideal: 400, mas se rota não trata, pode cair em 500
     expect([400, 500]).toContain(res.status);
 
-    // forte: garante que nem tentou chamar Meta
     expect((axios as any).get).not.toHaveBeenCalled();
   });
 
@@ -116,7 +110,6 @@ describe("Instagram Posts - Sync Errors (realistic)", () => {
 
     expect([500, 502]).toContain(res.status);
 
-    // forte: chamou Meta
     expect((axios as any).get).toHaveBeenCalled();
   });
 
@@ -134,7 +127,6 @@ describe("Instagram Posts - Sync Errors (realistic)", () => {
       pageAccessToken: "PAGE_TOKEN_1",
     });
 
-    // mesmo que a rota ignore o limit inválido, ela não pode quebrar
     (axios as any).get.mockResolvedValue({ data: { data: [] } });
 
     const res = await request(app)

@@ -13,7 +13,6 @@ describe("Instagram Posts - List (realistic)", () => {
   beforeEach(() => {
     jest.clearAllMocks();
 
-    // ✅ muitos handlers usam conta IG ativa/conectada antes de listar posts
     (prisma.instagramAccount.findFirst as jest.Mock).mockResolvedValue({
       id: "ig_acc_1",
       userId: "user-1",
@@ -23,7 +22,6 @@ describe("Instagram Posts - List (realistic)", () => {
       updatedAt: new Date(),
     } as any);
 
-    // ✅ alguns fluxos olham o usuário (ex: activeInstagramAccountId, etc.)
     (prisma.user.findUnique as jest.Mock).mockResolvedValue({
       id: "user-1",
       email: "test@local",
@@ -44,7 +42,6 @@ describe("Instagram Posts - List (realistic)", () => {
     const res = await request(app)
       .get("/api/instagram/posts?limit=20")
       .set("Authorization", makeAuthHeader("user-1"))
-      // ✅ garante que o authMiddleware em NODE_ENV=test injete o usuário
       .set("x-test-user-id", "user-1")
       .set("x-test-email", "test@local");
 
@@ -59,24 +56,22 @@ describe("Instagram Posts - List (realistic)", () => {
     expect(Array.isArray(items)).toBe(true);
     expect(items.length).toBe(20);
 
-    // ✅ forte: garante que buscou a conta IG e consultou o banco
     expect(prisma.instagramAccount.findFirst).toHaveBeenCalled();
     expect(prisma.instagramPost.findMany).toHaveBeenCalled();
 
-    // ✅ forte: tenta validar take/orderBy se existirem
     const callArg =
       (prisma.instagramPost.findMany as jest.Mock).mock.calls[0]?.[0] ?? {};
     if (callArg?.take !== undefined) expect(callArg.take).toBe(20);
     if (callArg?.orderBy !== undefined) {
       expect(JSON.stringify(callArg.orderBy)).toMatch(
-        /createdAt|timestamp|takenAt|igCreatedTime|publishedAt/i
+        /createdAt|timestamp|takenAt|igCreatedTime|publishedAt/i,
       );
     }
   });
 
   it("GET /api/instagram/posts sem limit deve defaultar para 20 (ou fallback)", async () => {
     (prisma.instagramPost.findMany as jest.Mock).mockResolvedValue(
-      Array.from({ length: 20 }).map((_, i) => ({ id: `p_${i + 1}` }))
+      Array.from({ length: 20 }).map((_, i) => ({ id: `p_${i + 1}` })),
     );
 
     const res = await request(app)

@@ -1,4 +1,4 @@
-export type TrendDirection = "up" | "down" | "equal";
+export type TrendDirection = "up" | "down" | "neutral" | "flat" | "same";
 
 export interface KpiComparativeDTO {
   label: string;

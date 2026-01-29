@@ -1,6 +1,5 @@
 import request from "supertest";
 
-// ✅ mock local COMPLETO do axios (tem create! + interceptors)
 jest.mock("axios", () => {
   const get = jest.fn();
   const post = jest.fn();
@@ -14,8 +13,8 @@ jest.mock("axios", () => {
 
   const create = jest.fn(() => instance);
 
-  // Alguns lugares podem chamar axios(...) como função
-  const axiosFn: any = (..._args: any[]) => Promise.resolve({ data: undefined });
+  const axiosFn: any = (..._args: any[]) =>
+    Promise.resolve({ data: undefined });
   axiosFn.get = get;
   axiosFn.post = post;
   axiosFn.create = create;
@@ -31,24 +30,26 @@ jest.mock("axios", () => {
 import axios from "axios";
 import { prisma } from "../../mocks/prismaClient";
 import { makeAuthHeader } from "../../utils/jwt";
-import { assertBasicJsonOk, assertHasRequestIdMaybe } from "../../utils/response";
+import {
+  assertBasicJsonOk,
+  assertHasRequestIdMaybe,
+} from "../../utils/response";
 import { app } from "../../../src/presentation/http/app";
 
 describe("Instagram Posts - Sync (realistic)", () => {
   beforeEach(() => {
     jest.clearAllMocks();
 
-    // ✅ previne 500 por falta de mock nesses métodos
-    (prisma.instagramPost.deleteMany as jest.Mock).mockResolvedValue({ count: 0 });
+    (prisma.instagramPost.deleteMany as jest.Mock).mockResolvedValue({
+      count: 0,
+    });
   });
 
   it("POST /api/instagram/posts/sync deve buscar da Meta (axios) e salvar (prisma)", async () => {
-    // ⚠️ o use-case usa user.activeInstagramAccountId, então mocka isso:
     (prisma.user.findUnique as jest.Mock).mockResolvedValue({
       activeInstagramAccountId: "ig_acc_1",
     });
 
-    // ⚠️ o use-case exige igUserId + pageAccessToken (não é accessToken!)
     (prisma.instagramAccount.findFirst as jest.Mock).mockResolvedValue({
       id: "ig_acc_1",
       userId: "user-1",
@@ -59,7 +60,6 @@ describe("Instagram Posts - Sync (realistic)", () => {
       pageAccessToken: "PAGE_TOKEN_1",
     });
 
-    // ✅ meta retorna 2 posts
     (axios as any).get.mockResolvedValue({
       data: {
         data: [
@@ -88,7 +88,6 @@ describe("Instagram Posts - Sync (realistic)", () => {
       .send({});
 
     if (res.status >= 500) {
-      // eslint-disable-next-line no-console
       console.log("SYNC 500 BODY:", res.body);
     }
 
@@ -98,24 +97,20 @@ describe("Instagram Posts - Sync (realistic)", () => {
     assertBasicJsonOk(res.body);
     assertHasRequestIdMaybe(res.body);
 
-    // ✅ forte: chamou a Meta API
     expect((axios as any).get).toHaveBeenCalled();
 
     const [url, cfg] = (axios as any).get.mock.calls[0] ?? [];
     expect(String(url)).toMatch(/graph\.facebook|\/media/i);
-
-    // ✅ IMPORTANTE:
-    // O access_token vai em cfg.params (não na URL string)
     expect(cfg).toBeTruthy();
     expect(cfg?.params).toBeTruthy();
     expect(String(cfg.params.access_token)).toMatch(/PAGE_TOKEN_1/i);
     expect(Number(cfg.params.limit)).toBe(20);
 
-    // ✅ forte: upsert foi chamado 2x
     expect(prisma.instagramPost.upsert).toHaveBeenCalled();
-    expect((prisma.instagramPost.upsert as jest.Mock).mock.calls.length).toBe(2);
+    expect((prisma.instagramPost.upsert as jest.Mock).mock.calls.length).toBe(
+      2,
+    );
 
-    // ✅ forte: delete old foi chamado (porque deleteOldBeyondLimit=true)
     expect(prisma.instagramPost.deleteMany).toHaveBeenCalled();
   });
 
@@ -150,17 +145,17 @@ describe("Instagram Posts - Sync (realistic)", () => {
       .send({});
 
     if (res.status >= 500) {
-      // eslint-disable-next-line no-console
       console.log("SYNC 500 BODY:", res.body);
     }
 
     expect(res.status).toBeGreaterThanOrEqual(200);
     expect(res.status).toBeLessThan(300);
 
-    // ✅ forte: garante que repassou limit=5 pro provider
     const [_url, cfg] = (axios as any).get.mock.calls[0] ?? [];
     expect(Number(cfg?.params?.limit)).toBe(5);
 
-    expect((prisma.instagramPost.upsert as jest.Mock).mock.calls.length).toBe(5);
+    expect((prisma.instagramPost.upsert as jest.Mock).mock.calls.length).toBe(
+      5,
+    );
   });
 });
