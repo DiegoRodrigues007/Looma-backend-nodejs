@@ -1,4 +1,3 @@
-// src/infrastructure/db/PrismaInstagramTokenStore.ts
 import type {
   IInstagramTokenStore,
   InstagramTokenRecord,
@@ -23,11 +22,6 @@ function safeBool(v: unknown): boolean | undefined {
 }
 
 export class PrismaInstagramTokenStore implements IInstagramTokenStore {
-  /**
-   * Pega a conta IG mais recente do usuário (fallback).
-   * (Se você quiser usar "conta ativa", o ideal é receber activeInstagramAccountId aqui
-   *  ou ter um método getActiveByUserId.)
-   */
   async getByUserId(userId: string): Promise<InstagramTokenRecord | null> {
     const uid = cleanOptString(userId);
     if (!uid) return null;
@@ -39,8 +33,8 @@ export class PrismaInstagramTokenStore implements IInstagramTokenStore {
 
     if (!row?.igUserId) return null;
 
-    // ✅ exige pelo menos um token
-    const hasToken = !!cleanOptString(row.accessToken) || !!cleanOptString(row.pageAccessToken);
+    const hasToken =
+      !!cleanOptString(row.accessToken) || !!cleanOptString(row.pageAccessToken);
     if (!hasToken) return null;
 
     return {
@@ -62,89 +56,72 @@ export class PrismaInstagramTokenStore implements IInstagramTokenStore {
     const userId = cleanOptString(input.userId);
     const igUserId = cleanOptString(input.igUserId);
 
-    if (!userId) {
-      throw new Error("userId é obrigatório para salvar token do Instagram");
-    }
-    if (!igUserId) {
-      throw new Error("igUserId é obrigatório para salvar token do Instagram");
-    }
+    if (!userId) throw new Error("userId é obrigatório para salvar token do Instagram");
+    if (!igUserId) throw new Error("igUserId é obrigatório para salvar token do Instagram");
 
-    const accessTokenClean = cleanOptString(input.accessToken);
-    const pageAccessTokenClean = cleanOptString(input.pageAccessToken);
+    const accessTokenClean = cleanOptString((input as any).accessToken);
+    const pageAccessTokenClean = cleanOptString((input as any).pageAccessToken);
 
-    // ✅ exige pelo menos um token (igual você já fazia)
     if (!accessTokenClean && !pageAccessTokenClean) {
       throw new Error(
         "accessToken ou pageAccessToken é obrigatório para salvar token do Instagram"
       );
     }
 
-    const usernameClean = cleanOptString(input.username);
-    const accountTypeClean = cleanOptString(input.accountType);
-    const facebookPageIdClean = cleanOptString(input.facebookPageId);
+    const usernameClean = cleanOptString((input as any).username);
+    const accountTypeClean = cleanOptString((input as any).accountType);
+    const facebookPageIdClean = cleanOptString((input as any).facebookPageId);
     const grantedScopesClean = cleanOptString((input as any).grantedScopes);
 
-    /**
-     * ✅ Update data:
-     * - Não zera accessToken se não vier um novo
-     * - pageAccessToken: permite limpar pra null quando vier explicitamente
-     * - Mantém isConnected quando vier boolean
-     */
-    const updateData: Record<string, any> = {
-      username: usernameClean,
-      accountType: accountTypeClean,
-      facebookPageId: facebookPageIdClean,
-      expiresAt: input.expiresAt ?? null,
-      lastRefreshedAt: input.lastRefreshedAt ?? null,
-      ...(grantedScopesClean ? { grantedScopes: grantedScopesClean } : {}),
-    };
-
     const isConnectedBool = safeBool((input as any).isConnected);
-    if (typeof isConnectedBool === "boolean") {
-      updateData.isConnected = isConnectedBool;
+    if (typeof isConnectedBool !== "boolean") {
+      throw new Error("isConnected é obrigatório para salvar token do Instagram");
     }
 
-    // ✅ só atualiza accessToken se vier (não overwrite acidental)
-    if (accessTokenClean) {
-      updateData.accessToken = accessTokenClean;
-    }
+    const updateData: Record<string, any> = {};
 
-    // ✅ pageAccessToken: se o campo existir no input, permite setar null (limpar)
+    if (hasOwn(input as any, "username")) updateData.username = usernameClean;
+    if (hasOwn(input as any, "accountType")) updateData.accountType = accountTypeClean;
+    if (hasOwn(input as any, "facebookPageId")) updateData.facebookPageId = facebookPageIdClean;
+    if (hasOwn(input as any, "grantedScopes")) updateData.grantedScopes = grantedScopesClean;
+
+    if (hasOwn(input as any, "expiresAt")) updateData.expiresAt = (input as any).expiresAt ?? null;
+    if (hasOwn(input as any, "lastRefreshedAt"))
+      updateData.lastRefreshedAt = (input as any).lastRefreshedAt ?? null;
+
+    updateData.isConnected = isConnectedBool;
+
+    if (accessTokenClean) updateData.accessToken = accessTokenClean;
+
     if (hasOwn(input as any, "pageAccessToken")) {
       updateData.pageAccessToken = pageAccessTokenClean;
     } else if (pageAccessTokenClean) {
-      // fallback: se veio valor, seta
       updateData.pageAccessToken = pageAccessTokenClean;
     }
 
-    /**
-     * ✅ Upsert usando unique composto do schema:
-     * @@unique([userId, igUserId], name: "userId_igUserId")
-     *
-     * No Prisma Client, isso vira: where: { userId_igUserId: { userId, igUserId } }
-     */
+    const createData: Record<string, any> = {
+      userId,
+      igUserId,
+      isConnected: isConnectedBool,
+      accessToken: accessTokenClean ?? "", 
+      pageAccessToken: pageAccessTokenClean,
+      ...(grantedScopesClean ? { grantedScopes: grantedScopesClean } : {}),
+    };
+
+    if (hasOwn(input as any, "username")) createData.username = usernameClean;
+    if (hasOwn(input as any, "accountType")) createData.accountType = accountTypeClean;
+    if (hasOwn(input as any, "facebookPageId")) createData.facebookPageId = facebookPageIdClean;
+
+    if (hasOwn(input as any, "expiresAt")) createData.expiresAt = (input as any).expiresAt ?? null;
+    if (hasOwn(input as any, "lastRefreshedAt"))
+      createData.lastRefreshedAt = (input as any).lastRefreshedAt ?? null;
+
     await prisma.instagramAccount.upsert({
       where: {
-        userId_igUserId: {
-          userId,
-          igUserId,
-        },
+        userId_igUserId: { userId, igUserId },
       },
       update: updateData,
-      create: {
-        userId,
-        igUserId,
-        username: usernameClean,
-        accountType: accountTypeClean,
-        facebookPageId: facebookPageIdClean,
-        expiresAt: input.expiresAt ?? null,
-        lastRefreshedAt: input.lastRefreshedAt ?? null,
-        ...(grantedScopesClean ? { grantedScopes: grantedScopesClean } : {}),
-        // ✅ create exige string (se seu schema não aceita null)
-        accessToken: accessTokenClean ?? "",
-        pageAccessToken: pageAccessTokenClean,
-        isConnected: typeof isConnectedBool === "boolean" ? isConnectedBool : true,
-      } as any,
+      create: createData as any,
     });
   }
 }

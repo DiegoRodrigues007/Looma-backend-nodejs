@@ -1,7 +1,9 @@
-// src/application/use-cases/instagram/RefreshInstagramTokenUseCase.ts
-
 import type { PrismaClient } from "@prisma/client";
 import { IInstagramIgLoginAuthService } from "../../ports/instagram/IInstagramIgLoginAuthService";
+import {
+  normalizeInstagramToken,
+  type RefreshProviderOutput,
+} from "../../instagram/InstagramTokenNormalizer";
 
 function s(v: unknown): string {
   return String(v ?? "").trim();
@@ -18,29 +20,11 @@ function safeDate(v: unknown): Date | null {
   return Number.isFinite(d.getTime()) ? d : null;
 }
 
-function asNumber(v: unknown): number | null {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
-
 export type RefreshInstagramTokenInput = {
-  /**
-   * ✅ Obrigatório (segurança): garante que você só refresca token da conta do usuário autenticado
-   */
   userId: string;
-
-  /**
-   * Se não vier, usa activeInstagramAccountId
-   */
   instagramAccountId?: string;
-
-  force?: boolean; // força refresh mesmo longe do vencimento
-  refreshIfExpiresBeforeMinutes?: number; // default 60
-
-  /**
-   * ✅ Compat (ignorado por este use-case, mas evita TS2353 quando algum caller ainda envia isso)
-   * OBS: o use-case SEMPRE lê do banco para evitar manipulação indevida.
-   */
+  force?: boolean;
+  refreshIfExpiresBeforeMinutes?: number; 
   currentAccessToken?: string | null;
   currentExpiresAt?: Date | null;
 };
@@ -61,16 +45,6 @@ export type RefreshInstagramTokenOutput =
       needsReauth?: boolean;
     };
 
-type RefreshProviderOutput =
-  | string
-  | {
-      accessToken?: string | null;
-      access_token?: string | null;
-      expiresAt?: Date | string | null;
-      expiresIn?: number | string | null;
-      expires_in?: number | string | null;
-    };
-
 export class RefreshInstagramTokenUseCase {
   constructor(
     private readonly prisma: PrismaClient,
@@ -85,7 +59,6 @@ export class RefreshInstagramTokenUseCase {
       refreshLong?: (t: string) => Promise<RefreshProviderOutput>;
     };
 
-    // ⚠️ importante: bind pra não perder "this" se o método usar contexto interno
     if (typeof authAny.refreshLongToken === "function") {
       return authAny.refreshLongToken.bind(this.auth);
     }
@@ -93,44 +66,6 @@ export class RefreshInstagramTokenUseCase {
       return authAny.refreshLong.bind(this.auth);
     }
     return null;
-  }
-
-  private normalizeRefreshOutput(out: RefreshProviderOutput): {
-    accessToken: string;
-    expiresAt: Date | null;
-  } {
-    // suporte a retorno "string"
-    if (typeof out === "string") {
-      const expiresAt = new Date(Date.now() + 60 * 24 * 60 * 60 * 1000); // ~60 dias
-      return { accessToken: out, expiresAt };
-    }
-
-    // suporta accessToken e access_token
-    const accessToken = s(out?.accessToken ?? out?.access_token);
-    if (!accessToken) {
-      throw new Error("Refresh do token retornou vazio. Refaça o login.");
-    }
-
-    // 1) expiresAt direto
-    const expRaw = out?.expiresAt ?? null;
-    const expDate = safeDate(expRaw);
-    if (expDate) return { accessToken, expiresAt: expDate };
-
-    // 2) expiresIn / expires_in (segundos)
-    const expIn =
-      asNumber(out?.expiresIn) ??
-      asNumber(out?.expires_in) ??
-      null;
-
-    if (expIn != null && expIn > 0) {
-      return { accessToken, expiresAt: new Date(Date.now() + expIn * 1000) };
-    }
-
-    // 3) fallback seguro
-    return {
-      accessToken,
-      expiresAt: new Date(Date.now() + 60 * 24 * 60 * 60 * 1000),
-    };
   }
 
   private async refreshToken(longToken: string): Promise<{
@@ -145,7 +80,8 @@ export class RefreshInstagramTokenUseCase {
     }
 
     const out = await fn(longToken);
-    return this.normalizeRefreshOutput(out);
+
+    return normalizeInstagramToken(out, { fallbackDays: 60 });
   }
 
   async execute(input: RefreshInstagramTokenInput): Promise<RefreshInstagramTokenOutput> {
@@ -178,7 +114,6 @@ export class RefreshInstagramTokenUseCase {
       };
     }
 
-    // ✅ não usa $transaction aqui pra evitar virar array e bagunçar tipagem
     const acc = await this.prisma.instagramAccount.findFirst({
       where: { id: instagramAccountId, userId },
       select: {
@@ -240,7 +175,6 @@ export class RefreshInstagramTokenUseCase {
     try {
       const refreshed = await this.refreshToken(longToken);
 
-      // ✅ só sobrescreve pageAccessToken se estiver vazio/flag inválida (testes/legado)
       const currentPage = s((acc as any).pageAccessToken);
       const shouldUpdatePageAccessToken =
         !currentPage ||
@@ -255,7 +189,6 @@ export class RefreshInstagramTokenUseCase {
             ? refreshed.accessToken
             : (acc as any).pageAccessToken,
           expiresAt: refreshed.expiresAt,
-          // se existir no schema, ótimo; se não existir, o "as any" evita travar TS
           lastRefreshedAt: new Date(),
         } as any,
       });
