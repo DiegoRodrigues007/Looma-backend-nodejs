@@ -1,28 +1,46 @@
+// src/application/services/metrics/MetricsHistoryService.ts
 import { IMetricsSnapshotRepository } from "../../../domain/repositories/IMetricsSnapshotRepository";
 import { MetricsSnapshot, MetricsPlatform } from "../../../domain/entities/MetricsSnapshot";
 import { aggregateSnapshotsAverage } from "../../../domain/metrics/calculators/aggregateSnapshots";
 
 type SnapshotInput = Omit<MetricsSnapshot, "userId" | "platform" | "date">;
 
+function startOfDayUTC(date: Date): Date {
+  const d = new Date(date);
+  d.setUTCHours(0, 0, 0, 0);
+  return d;
+}
+
+function endOfDayUTC(date: Date): Date {
+  const d = new Date(date);
+  d.setUTCHours(23, 59, 59, 999);
+  return d;
+}
+
+/**
+ * Detecta erro de unique constraint (Prisma P2002) de forma resiliente.
+ * Isso permite que ensureDailySnapshot seja idempotente sob concorrência.
+ */
+function isUniqueConstraintError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e: any = err;
+
+  // Prisma
+  if (e.code === "P2002") return true;
+
+  // Fallback por mensagem
+  const msg = String(e.message || "").toLowerCase();
+  if (msg.includes("unique constraint")) return true;
+  if (msg.includes("duplicate key")) return true;
+
+  return false;
+}
+
 export class MetricsHistoryService {
   constructor(private readonly repo: IMetricsSnapshotRepository) {}
 
-  private startOfDay(date: Date): Date {
-    const d = new Date(date);
-    d.setHours(0, 0, 0, 0);
-    return d;
-  }
-
-  private endOfDay(date: Date): Date {
-    const d = new Date(date);
-    d.setHours(23, 59, 59, 999);
-    return d;
-  }
-
   private normalizeRange(from: Date, to: Date): { from: Date; to: Date } {
-    const f = this.startOfDay(from);
-    const t = this.endOfDay(to);
-    return { from: f, to: t };
+    return { from: startOfDayUTC(from), to: endOfDayUTC(to) };
   }
 
   async saveDailySnapshot(
@@ -31,28 +49,34 @@ export class MetricsHistoryService {
     snapshot: SnapshotInput,
     date?: Date
   ): Promise<void> {
-    const day = this.startOfDay(date ?? new Date());
+    const day = startOfDayUTC(date ?? new Date());
 
     const entity = new MetricsSnapshot(
       userId,
       platform,
       day,
-      snapshot.followers,
-      snapshot.reach,
-      snapshot.totalInteractions,
-      snapshot.engagementRate
+      Number(snapshot.followers) || 0,
+      Number(snapshot.reach) || 0,
+      Number(snapshot.totalInteractions) || 0,
+      Number(snapshot.engagementRate) || 0
     );
 
     await this.repo.save(entity);
   }
 
+  /**
+   * Idempotente: garante no máximo 1 snapshot por dia.
+   * - Se já existe -> false
+   * - Se conseguir salvar -> true
+   * - Se corrida gerar unique constraint -> false (outro worker salvou primeiro)
+   */
   async ensureDailySnapshot(
     userId: string,
     platform: MetricsPlatform,
     snapshot: SnapshotInput,
     date?: Date
   ): Promise<boolean> {
-    const day = this.startOfDay(date ?? new Date());
+    const day = startOfDayUTC(date ?? new Date());
 
     const existing = await this.repo.findByDate(userId, platform, day);
     if (existing) return false;
@@ -61,14 +85,20 @@ export class MetricsHistoryService {
       userId,
       platform,
       day,
-      snapshot.followers,
-      snapshot.reach,
-      snapshot.totalInteractions,
-      snapshot.engagementRate
+      Number(snapshot.followers) || 0,
+      Number(snapshot.reach) || 0,
+      Number(snapshot.totalInteractions) || 0,
+      Number(snapshot.engagementRate) || 0
     );
 
-    await this.repo.save(entity);
-    return true;
+    try {
+      await this.repo.save(entity);
+      return true;
+    } catch (err) {
+      // ✅ concorrência: unique constraint = alguém salvou antes
+      if (isUniqueConstraintError(err)) return false;
+      throw err;
+    }
   }
 
   async getPeriodAverage(

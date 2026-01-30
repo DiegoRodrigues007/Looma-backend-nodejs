@@ -67,29 +67,37 @@ export async function fetchDailyInteractionsByPosts(opts: {
   const { igUserId, accessToken, from, to, graph } = opts;
 
   const fromTs = parseYmd(from).getTime();
-  const toTs = parseYmd(to).getTime() + 86399999;
+  const toTs = parseYmd(to).getTime() + 86_399_999; // fim do dia
 
   const allMedia: IgMediaItem[] = [];
   let after: string | undefined = undefined;
 
-  for (let guard = 0; guard < 30; guard++) {
+  // ✅ era 30 e quebrava STRESS (50 páginas). Agora suporta bem mais e ainda tem guard.
+  const MAX_PAGES = 500;
+
+  for (let guard = 0; guard < MAX_PAGES; guard++) {
+    const params: any = {
+      fields: "id,timestamp,like_count,comments_count",
+      limit: 100,
+      access_token: accessToken,
+    };
+    if (after) params.after = after;
+
     const mediaRes: AxiosResponse<IgMediaResponse> =
-      await graph.get<IgMediaResponse>(`/${igUserId}/media`, {
-        params: {
-          fields: "id,timestamp,like_count,comments_count",
-          limit: 100,
-          after,
-          access_token: accessToken,
-        },
-      });
+      await graph.get<IgMediaResponse>(`/${igUserId}/media`, { params });
 
     const data = mediaRes.data?.data ?? [];
+
+    // ✅ se a API/mock devolver vazio, não tem por que continuar
+    if (data.length === 0) break;
+
     allMedia.push(...data);
 
     const nextAfter = mediaRes.data?.paging?.cursors?.after;
     if (!nextAfter) break;
     after = nextAfter;
 
+    // ✅ otimização: se o último post da página já é mais velho que o from, podemos parar
     const oldest = data[data.length - 1]?.timestamp;
     if (oldest) {
       const oldestTs = new Date(oldest).getTime();
@@ -116,11 +124,7 @@ export async function fetchDailyInteractionsByPosts(opts: {
     addByDay(likesByDay, day, likes);
     addByDay(commentsByDay, day, comments);
 
-    addByDay(
-      totalByDay,
-      day,
-      sumInteractions({ likes, comments })
-    );
+    addByDay(totalByDay, day, sumInteractions({ likes, comments }));
   }
 
   await asyncPool(6, inRange, async (m) => {
@@ -158,12 +162,9 @@ export async function fetchDailyInteractionsByPosts(opts: {
       addByDay(sharesByDay, day, shares);
       addByDay(savesByDay, day, saved);
 
-      addByDay(
-        totalByDay,
-        day,
-        sumInteractions({ shares, saved })
-      );
+      addByDay(totalByDay, day, sumInteractions({ shares, saved }));
     } catch {
+      // mantém silencioso para não falhar em caso de limitação/erro do Graph
     }
   });
 
