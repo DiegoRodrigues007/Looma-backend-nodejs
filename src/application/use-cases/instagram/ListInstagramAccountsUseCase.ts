@@ -1,15 +1,10 @@
-// src/application/instagram/ListInstagramAccountsUseCase.ts
-import { prisma } from "../../../infrastructure/db/prismaClient";
+import { IUserRepository } from "../../ports/db/IUserRepository";
+import {
+  IInstagramAccountRepository,
+  InstagramAccountListDTO,
+} from "../../ports/db/IInstagramAccountRepository";
 
-export type InstagramAccountListItem = {
-  id: string;
-  igUserId: string;
-  username: string | null;
-  accountType: string | null;
-  facebookPageId: string | null;
-  expiresAt: Date | null;
-  isConnected: boolean;
-  updatedAt: Date;
+export type InstagramAccountListItem = InstagramAccountListDTO & {
   isActive: boolean;
 };
 
@@ -21,6 +16,11 @@ export type ListInstagramAccountsResult = {
 };
 
 export class ListInstagramAccountsUseCase {
+  constructor(
+    private readonly userRepo: IUserRepository,
+    private readonly instagramAccountRepo: IInstagramAccountRepository
+  ) {}
+
   async execute(userId: string): Promise<ListInstagramAccountsResult> {
     const uid = String(userId ?? "").trim();
 
@@ -33,43 +33,21 @@ export class ListInstagramAccountsUseCase {
       };
     }
 
-    const user = await prisma.user.findUnique({
-      where: { id: uid },
-      select: { activeInstagramAccountId: true },
-    });
+    const [activeFromUser, rows] = await Promise.all([
+      this.userRepo.getActiveInstagramAccountId(uid),
+      this.instagramAccountRepo.listByUser(uid),
+    ]);
 
-    const rows = await prisma.instagramAccount.findMany({
-      where: {
-        userId: uid,
-        isConnected: true,
-        OR: [{ pageAccessToken: { not: null } }, { accessToken: { not: null } }],
-      },
-      orderBy: { updatedAt: "desc" },
-      select: {
-        id: true,
-        igUserId: true,
-        username: true,
-        accountType: true,
-        facebookPageId: true,
-        expiresAt: true,
-        isConnected: true,
-        updatedAt: true,
-      },
-      take: 50,
-    });
+    let activeId = activeFromUser ?? null;
 
-    // ✅ Se não tem ativa e tem contas, define a mais recente como ativa
-    let activeId = user?.activeInstagramAccountId ?? null;
-
-    // Se activeId existir mas não estiver mais na lista (ex: desconectou), recalcula
-    const activeExistsInRows = activeId ? rows.some((r) => r.id === activeId) : false;
+    const activeExistsInRows = activeId
+      ? rows.some((r) => r.id === activeId)
+      : false;
 
     if ((!activeId || !activeExistsInRows) && rows.length > 0) {
       activeId = rows[0].id;
-      await prisma.user.update({
-        where: { id: uid },
-        data: { activeInstagramAccountId: activeId },
-      });
+
+      await this.userRepo.setActiveInstagramAccountId(uid, activeId);
     }
 
     return {
@@ -77,14 +55,7 @@ export class ListInstagramAccountsUseCase {
       activeInstagramAccountId: activeId,
       total: rows.length,
       accounts: rows.map((r) => ({
-        id: r.id,
-        igUserId: r.igUserId,
-        username: r.username ?? null,
-        accountType: r.accountType ?? null,
-        facebookPageId: r.facebookPageId ?? null,
-        expiresAt: r.expiresAt ?? null,
-        isConnected: r.isConnected,
-        updatedAt: r.updatedAt,
+        ...r,
         isActive: activeId ? r.id === activeId : false,
       })),
     };

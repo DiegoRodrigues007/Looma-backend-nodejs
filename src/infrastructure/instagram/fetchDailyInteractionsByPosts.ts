@@ -1,178 +1,169 @@
-import axios from "axios";
-import type { AxiosResponse } from "axios";
-import { parseYmd, ymd } from "../../shared/date/instagramDateUtils";
-import { toFiniteNumber } from "../../domain/metrics/instagram/instagramInsightsMapper";
+import type { IInstagramGraphClient } from "../../application/ports/instagram/IInstagramGraphClient";
 import {
-  addByDay,
-  sumInteractions,
-} from "../../domain/metrics/calculators/dailyAggregators";
+  DateRangeYmd,
+  Ymd,
+  DataIntegrityGuard,
+  DailyInteractionsCalculator,
+  InstagramDomainError,
+  ConcurrencyPolicy,
+} from "../../domain/instagram";
 
-type IgMediaItem = {
-  id: string;
-  timestamp: string;
-  like_count?: number | string;
-  comments_count?: number | string;
-};
-
-type IgMediaResponse = {
-  data: IgMediaItem[];
-  paging?: {
-    cursors?: { after?: string };
-    next?: string;
-  };
-};
-
-type IgInsightRow = {
-  name?: string;
-  values?: Array<{ value?: any }>;
-  value?: any;
-  total_value?: any;
-};
-
-type IgInsightsResponse = {
-  data: IgInsightRow[];
-};
-
-async function asyncPool<T, R>(
-  poolLimit: number,
-  array: T[],
-  iteratorFn: (item: T, index: number) => Promise<R>
-): Promise<R[]> {
-  const ret: Promise<R>[] = [];
-  const executing = new Set<Promise<any>>();
-
-  for (let i = 0; i < array.length; i++) {
-    const p = Promise.resolve().then(() => iteratorFn(array[i], i));
-    ret.push(p);
-
-    executing.add(p);
-    const clean = () => executing.delete(p);
-    p.then(clean).catch(clean);
-
-    if (executing.size >= poolLimit) {
-      await Promise.race(executing);
-    }
-  }
-
-  return Promise.all(ret);
-}
-
-export async function fetchDailyInteractionsByPosts(opts: {
+export type FetchDailyInteractionsByPostsInput = {
   igUserId: string;
   accessToken: string;
   from: string;
-  to: string;
-  graph: ReturnType<typeof axios.create>;
-}) {
-  const { igUserId, accessToken, from, to, graph } = opts;
+  to: string; 
+  maxPosts?: number;
+  pageLimit?: number;
+};
 
-  const fromTs = parseYmd(from).getTime();
-  const toTs = parseYmd(to).getTime() + 86_399_999; // fim do dia
+export type DailyInteractions = ReturnType<typeof DailyInteractionsCalculator.compute>[number];
 
-  const allMedia: IgMediaItem[] = [];
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length) as any;
+  let nextIndex = 0;
+
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const current = nextIndex++;
+      results[current] = await fn(items[current], current);
+    }
+  });
+
+  await Promise.all(workers);
+  return results;
+}
+
+function safeIsoToYmd(isoMaybe: unknown): string | null {
+  const s = String(isoMaybe ?? "").trim();
+  if (!s) return null;
+  const ymd = s.slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(ymd) ? ymd : null;
+}
+
+function daysInclusive(fromYmd: string, toYmd: string): number {
+  const a = new Date(`${fromYmd}T00:00:00.000Z`).getTime();
+  const b = new Date(`${toYmd}T00:00:00.000Z`).getTime();
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return 1;
+  if (a > b) return 1;
+  return Math.floor((b - a) / (24 * 60 * 60 * 1000)) + 1;
+}
+
+export async function fetchDailyInteractionsByPosts(
+  graph: IInstagramGraphClient,
+  input: FetchDailyInteractionsByPostsInput
+): Promise<DailyInteractions[]> {
+  const igUserId = String(input.igUserId ?? "").trim();
+  const accessToken = String(input.accessToken ?? "").trim();
+
+  if (!igUserId) throw InstagramDomainError.invalidInput("igUserId is required");
+  if (!accessToken) {
+    throw new InstagramDomainError({
+      code: "INVALID_TOKEN",
+      message: "accessToken is required",
+      retryable: false,
+    });
+  }
+
+  const range = DateRangeYmd(input.from, input.to);
+
+  const pageLimit = Math.max(1, Math.min(50, Math.floor(input.pageLimit ?? 50)));
+
+  const days = daysInclusive(range.from, range.to);
+
+  const maxPosts = Math.max(30, Math.min(500, Math.floor(input.maxPosts ?? days * 15)));
+
+  const fields = "id,timestamp,like_count,comments_count";
+
+  const media: any[] = [];
   let after: string | undefined = undefined;
 
-  // ✅ era 30 e quebrava STRESS (50 páginas). Agora suporta bem mais e ainda tem guard.
-  const MAX_PAGES = 500;
+  const maxPages = Math.min(20, Math.max(1, Math.ceil(maxPosts / pageLimit)));
 
-  for (let guard = 0; guard < MAX_PAGES; guard++) {
-    const params: any = {
-      fields: "id,timestamp,like_count,comments_count",
-      limit: 100,
-      access_token: accessToken,
-    };
-    if (after) params.after = after;
+  for (let page = 0; page < maxPages && media.length < maxPosts; page++) {
+    const remaining = maxPosts - media.length;
+    const pageSize = Math.min(pageLimit, remaining);
 
-    const mediaRes: AxiosResponse<IgMediaResponse> =
-      await graph.get<IgMediaResponse>(`/${igUserId}/media`, { params });
+    try {
+      const resp = await graph.getRecentMediaPaged({
+        igUserId,
+        accessToken,
+        limit: pageSize,
+        after,
+        fields,
+        timeoutMs: 15000,
+      });
 
-    const data = mediaRes.data?.data ?? [];
+      const batch = Array.isArray(resp.data) ? resp.data : [];
+      if (!batch.length) break;
 
-    // ✅ se a API/mock devolver vazio, não tem por que continuar
-    if (data.length === 0) break;
+      media.push(...batch);
 
-    allMedia.push(...data);
-
-    const nextAfter = mediaRes.data?.paging?.cursors?.after;
-    if (!nextAfter) break;
-    after = nextAfter;
-
-    // ✅ otimização: se o último post da página já é mais velho que o from, podemos parar
-    const oldest = data[data.length - 1]?.timestamp;
-    if (oldest) {
-      const oldestTs = new Date(oldest).getTime();
-      if (oldestTs < fromTs) break;
+      const nextAfter = resp.paging?.cursors?.after;
+      if (!nextAfter) break;
+      after = nextAfter;
+    } catch (e: any) {
+      break;
     }
   }
 
-  const inRange = allMedia.filter((m) => {
-    const ts = new Date(m.timestamp).getTime();
-    return ts >= fromTs && ts <= toTs;
-  });
+  const interactionItems = media
+    .map((m) => {
+      const ymdStr = safeIsoToYmd(m.timestamp);
+      if (!ymdStr) return null;
 
-  const likesByDay: Record<string, number> = {};
-  const commentsByDay: Record<string, number> = {};
-  const sharesByDay: Record<string, number> = {};
-  const savesByDay: Record<string, number> = {};
-  const totalByDay: Record<string, number> = {};
-
-  for (const m of inRange) {
-    const day = ymd(new Date(m.timestamp));
-    const likes = toFiniteNumber(m.like_count);
-    const comments = toFiniteNumber(m.comments_count);
-
-    addByDay(likesByDay, day, likes);
-    addByDay(commentsByDay, day, comments);
-
-    addByDay(totalByDay, day, sumInteractions({ likes, comments }));
-  }
-
-  await asyncPool(6, inRange, async (m) => {
-    try {
-      const insightsRes: AxiosResponse<IgInsightsResponse> =
-        await graph.get<IgInsightsResponse>(`/${m.id}/insights`, {
-          params: {
-            metric: "shares,saved",
-            access_token: accessToken,
-          },
-        });
-
-      const arr = insightsRes.data?.data ?? [];
-
-      const pickValue = (row: IgInsightRow): number => {
-        const v =
-          row?.values?.[0]?.value ??
-          row?.total_value ??
-          row?.value ??
-          row ??
-          0;
-        return toFiniteNumber(v);
-      };
-
-      const map: Record<string, number> = {};
-      for (const r of arr) {
-        const name = String(r?.name ?? "");
-        map[name] = pickValue(r);
+      let ymd: ReturnType<typeof Ymd>;
+      try {
+        ymd = Ymd(ymdStr);
+      } catch {
+        return null;
       }
 
-      const shares = toFiniteNumber(map.shares);
-      const saved = toFiniteNumber(map.saved);
-      const day = ymd(new Date(m.timestamp));
+      if (ymd < range.from || ymd > range.to) return null;
 
-      addByDay(sharesByDay, day, shares);
-      addByDay(savesByDay, day, saved);
+      const like = DataIntegrityGuard.nonNegativeInt("like_count", (m as any).like_count);
+      const comments = DataIntegrityGuard.nonNegativeInt("comments_count", (m as any).comments_count);
 
-      addByDay(totalByDay, day, sumInteractions({ shares, saved }));
+      return {
+        ymd,
+        likes: like.value,
+        comments: comments.value,
+        shares: 0,
+        saved: 0,
+      };
+    })
+    .filter(Boolean) as Array<{
+    ymd: ReturnType<typeof Ymd>;
+    likes: number;
+    comments: number;
+    shares: number;
+    saved: number;
+  }>;
+
+  return DailyInteractionsCalculator.compute(range, interactionItems);
+}
+
+
+export async function enrichDailyWithReachByMedia(
+  graph: IInstagramGraphClient,
+  mediaIds: string[],
+  accessToken: string
+): Promise<Record<string, number>> {
+  const conc = ConcurrencyPolicy.limitFor("insights_per_media");
+
+  const pairs = await mapLimit(mediaIds, conc, async (id) => {
+    try {
+      const reach = await graph.getMediaReach({ mediaId: id, accessToken, timeoutMs: 15000 });
+      const fixed = DataIntegrityGuard.nonNegativeInt("reach", reach).value;
+      return [id, fixed] as const;
     } catch {
-      // mantém silencioso para não falhar em caso de limitação/erro do Graph
+      return [id, 0] as const;
     }
   });
 
-  return {
-    likesByDay,
-    commentsByDay,
-    sharesByDay,
-    savesByDay,
-    totalByDay,
-  };
+  return Object.fromEntries(pairs);
 }

@@ -1,4 +1,3 @@
-// src/application/services/metrics/MetricsHistoryService.ts
 import { IMetricsSnapshotRepository } from "../../../domain/repositories/IMetricsSnapshotRepository";
 import { MetricsSnapshot, MetricsPlatform } from "../../../domain/entities/MetricsSnapshot";
 import { aggregateSnapshotsAverage } from "../../../domain/metrics/calculators/aggregateSnapshots";
@@ -17,18 +16,12 @@ function endOfDayUTC(date: Date): Date {
   return d;
 }
 
-/**
- * Detecta erro de unique constraint (Prisma P2002) de forma resiliente.
- * Isso permite que ensureDailySnapshot seja idempotente sob concorrência.
- */
 function isUniqueConstraintError(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
   const e: any = err;
 
-  // Prisma
   if (e.code === "P2002") return true;
 
-  // Fallback por mensagem
   const msg = String(e.message || "").toLowerCase();
   if (msg.includes("unique constraint")) return true;
   if (msg.includes("duplicate key")) return true;
@@ -64,12 +57,6 @@ export class MetricsHistoryService {
     await this.repo.save(entity);
   }
 
-  /**
-   * Idempotente: garante no máximo 1 snapshot por dia.
-   * - Se já existe -> false
-   * - Se conseguir salvar -> true
-   * - Se corrida gerar unique constraint -> false (outro worker salvou primeiro)
-   */
   async ensureDailySnapshot(
     userId: string,
     platform: MetricsPlatform,
@@ -95,7 +82,6 @@ export class MetricsHistoryService {
       await this.repo.save(entity);
       return true;
     } catch (err) {
-      // ✅ concorrência: unique constraint = alguém salvou antes
       if (isUniqueConstraintError(err)) return false;
       throw err;
     }

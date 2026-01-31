@@ -3,9 +3,67 @@ import {
   WeeklyInsightsService,
   TopContentForInsights,
 } from "../../../application/services/insights/WeeklyInsightsService";
-import { prisma } from "../../../infrastructure/db/prismaClient";
 import { InstagramTopContentService } from "../../../infrastructure/instagram/services/InstagramTopContentService";
 import { PostInsightsOrchestratorService } from "../../../application/services/insights/PostInsightsOrchestratorService";
+
+export type IgCreds = {
+  igUserId: string;
+  accessToken: string;
+};
+
+export interface IInstagramAccountCredentialsRepository {
+
+  getConnectedCredsByUserId(params: {
+    userId: string;
+    instagramAccountId?: string | null;
+  }): Promise<IgCreds | null>;
+}
+
+export type InstagramPostRef = {
+  id: string; 
+  igMediaId?: string | null; 
+};
+
+export interface IInstagramPostRepository {
+  findByIgMediaId(params: {
+    userId: string;
+    instagramAccountId?: string | null;
+    igMediaId: string;
+  }): Promise<InstagramPostRef | null>;
+
+  findById(params: {
+    userId: string;
+    instagramAccountId?: string | null;
+    id: string;
+  }): Promise<InstagramPostRef | null>;
+}
+
+export type PostInsightCached = {
+  verdict: any;
+  score: any;
+  evidence: any;
+  why: any;
+  improve: any;
+  continue: any;
+};
+
+export interface IInstagramPostInsightResultRepository {
+  findLatest(params: {
+    postId: string;
+    baselineWindowDays: number;
+  }): Promise<PostInsightCached | null>;
+
+  upsert(params: {
+    postId: string;
+    baselineWindowDays: number;
+    verdict: string;
+    score: number | null;
+    evidence: any;
+    why: any;
+    improve: any;
+    continue: any;
+  }): Promise<void>;
+}
 
 function getUserIdFromReq(req: Request): string | null {
   const anyReq = req as any;
@@ -14,7 +72,7 @@ function getUserIdFromReq(req: Request): string | null {
     anyReq.userId ||
     anyReq.user?.id ||
     anyReq.user?.userId ||
-    anyReq.user?.sub || 
+    anyReq.user?.sub ||
     anyReq.auth?.userId ||
     anyReq.session?.userId ||
     null
@@ -41,11 +99,6 @@ function clampInt(n: number, min: number, max: number, fallback: number) {
   const v = Math.floor(num);
   return Math.min(Math.max(v, min), max);
 }
-
-type IgCreds = {
-  igUserId: string;
-  accessToken: string;
-};
 
 function pickInsightPayload(data: any) {
   const verdict =
@@ -82,42 +135,38 @@ function ensureJson(value: any, fallback: any) {
   return value;
 }
 
+
+type InsightsControllerDeps = {
+  weeklyInsightsService: WeeklyInsightsService;
+
+  topContentService: InstagramTopContentService;
+
+  postInsightsService: PostInsightsOrchestratorService;
+
+  credsRepo: IInstagramAccountCredentialsRepository;
+  postRepo: IInstagramPostRepository;
+  postInsightsRepo: IInstagramPostInsightResultRepository;
+};
+
 export class InsightsController {
-  private readonly topContentService = new InstagramTopContentService();
+  private readonly weeklyInsightsService: WeeklyInsightsService;
+  private readonly topContentService: InstagramTopContentService;
+  private readonly postInsightsService: PostInsightsOrchestratorService;
 
-  private readonly postInsightsService = new PostInsightsOrchestratorService();
+  private readonly credsRepo: IInstagramAccountCredentialsRepository;
+  private readonly postRepo: IInstagramPostRepository;
+  private readonly postInsightsRepo: IInstagramPostInsightResultRepository;
 
-  constructor(private readonly weeklyInsightsService: WeeklyInsightsService) {}
+  constructor(deps: InsightsControllerDeps) {
+    this.weeklyInsightsService = deps.weeklyInsightsService;
+    this.topContentService = deps.topContentService;
+    this.postInsightsService = deps.postInsightsService;
 
-  private async getConnectedInstagramCreds(
-    userId: string,
-    instagramAccountId?: string | null
-  ): Promise<IgCreds | null> {
-    const account = await prisma.instagramAccount.findFirst({
-      where: {
-        userId,
-        isConnected: true,
-        ...(instagramAccountId ? { id: instagramAccountId } : {}),
-      },
-      orderBy: { updatedAt: "desc" },
-      select: {
-        igUserId: true, 
-        accessToken: true,
-        pageAccessToken: true,
-      },
-    });
-
-    const igUserId = account?.igUserId ? String(account.igUserId) : null;
-    const token = (account?.pageAccessToken ?? account?.accessToken) ?? null;
-
-    if (!igUserId || !token) return null;
-
-    return { igUserId, accessToken: String(token) };
+    this.credsRepo = deps.credsRepo;
+    this.postRepo = deps.postRepo;
+    this.postInsightsRepo = deps.postInsightsRepo;
   }
 
-  /**
-   * GET /api/metrics/instagram/insights/weekly?days=7&instagramAccountId=...
-   */
   async weeklyInstagramInsights(req: Request, res: Response) {
     try {
       const userId = getUserIdFromReq(req);
@@ -131,7 +180,6 @@ export class InsightsController {
       const daysRaw = Number(req.query.days ?? 7);
       const days = clampInt(daysRaw, 3, 30, 7);
 
-      // ✅ Período atual (pra buscar TopContent)
       const today = new Date();
       today.setUTCHours(0, 0, 0, 0);
 
@@ -142,14 +190,13 @@ export class InsightsController {
       const periodFrom = ymd(currentFrom);
       const periodTo = ymd(to);
 
-      // ✅ tenta buscar topContent para regras adicionais
       let topContent: TopContentForInsights[] | undefined;
 
       try {
-        const creds = await this.getConnectedInstagramCreds(
-          String(userId),
-          accountFilter
-        );
+        const creds = await this.credsRepo.getConnectedCredsByUserId({
+          userId: String(userId),
+          instagramAccountId: accountFilter,
+        });
 
         if (creds) {
           const top = await this.topContentService.fetchTopContent({
@@ -192,13 +239,6 @@ export class InsightsController {
     }
   }
 
-  /**
-   * ✅ Tooltip do gráfico
-   * GET /api/metrics/instagram/insights/post?postId=...&baselineDays=30&instagramAccountId=...
-   *
-   * ✅ DB-FIRST + UPSERT por unique composto:
-   * postId_baselineWindowDays
-   */
   async instagramPostInsights(req: Request, res: Response) {
     try {
       const userId = getUserIdFromReq(req);
@@ -216,10 +256,10 @@ export class InsightsController {
       const baselineDaysRaw = Number(req.query.baselineDays ?? 30);
       const baselineDays = clampInt(baselineDaysRaw, 7, 90, 30);
 
-      const creds = await this.getConnectedInstagramCreds(
-        String(userId),
-        accountFilter
-      );
+      const creds = await this.credsRepo.getConnectedCredsByUserId({
+        userId: String(userId),
+        instagramAccountId: accountFilter,
+      });
 
       if (!creds) {
         return res.status(400).json({
@@ -227,36 +267,26 @@ export class InsightsController {
         });
       }
 
-      /**
-       * 1) Resolver o "post interno" (InstagramPosts.id) a partir do postId do front.
-       *    - Se o front mandar igMediaId (ex: "1795070..."), buscamos por igMediaId
-       *    - Se mandar UUID (id interno), tentamos buscar por id
-       *
-       * ✅ importante: filtra por instagramAccountId quando vier
-       * (assim evita misturar duas contas do mesmo user)
-       */
-      const postWhereBase: any = {
+      const postWhere = {
         userId: String(userId),
-        ...(accountFilter ? { instagramAccountId: accountFilter } : {}),
+        instagramAccountId: accountFilter,
       };
 
       const post =
-        (await prisma.instagramPost.findFirst({
-          where: { ...postWhereBase, igMediaId: postIdRaw },
-          select: { id: true, igMediaId: true },
+        (await this.postRepo.findByIgMediaId({
+          ...postWhere,
+          igMediaId: postIdRaw,
         })) ??
-        (await prisma.instagramPost.findFirst({
-          where: { ...postWhereBase, id: postIdRaw },
-          select: { id: true, igMediaId: true },
+        (await this.postRepo.findById({
+          ...postWhere,
+          id: postIdRaw,
         }));
 
       if (!post?.id) {
-        // Se não tem o post no banco ainda, ainda dá pra calcular via API,
-        // mas não dá pra salvar resultado sem postId interno.
         const data = await this.postInsightsService.run({
           accessToken: creds.accessToken,
           igUserId: creds.igUserId,
-          postId: postIdRaw, // aqui é igMediaId
+          postId: postIdRaw,
           baselineDays,
         });
 
@@ -270,15 +300,9 @@ export class InsightsController {
         });
       }
 
-      /**
-       * 2) DB-FIRST: tenta pegar resultado já salvo
-       */
-      const cached = await prisma.instagramPostInsightResult.findFirst({
-        where: {
-          postId: post.id,
-          baselineWindowDays: baselineDays,
-        },
-        orderBy: { computedAt: "desc" },
+      const cached = await this.postInsightsRepo.findLatest({
+        postId: post.id,
+        baselineWindowDays: baselineDays,
       });
 
       if (cached) {
@@ -296,9 +320,6 @@ export class InsightsController {
         });
       }
 
-      /**
-       * 3) Se não tiver no banco, calcula
-       */
       const data = await this.postInsightsService.run({
         accessToken: creds.accessToken,
         igUserId: creds.igUserId,
@@ -308,52 +329,26 @@ export class InsightsController {
 
       const picked = pickInsightPayload(data);
 
-      /**
-       * 4) Normaliza payload para não quebrar o Prisma (campos obrigatórios)
-       */
       const safeVerdict = String(picked.verdict ?? "stable");
       const safeScore = normalizeScore(picked.score);
 
-      // JSON obrigatórios: nunca podem ser null
       const safeEvidence = ensureJson(picked.evidence, []);
       const safeWhy = ensureJson(picked.why, []);
       const safeImprove = ensureJson(picked.improve, []);
       const safeContinue = ensureJson(picked.continueDoing, []);
 
-      /**
-       * 5) Persistência (UPSERT) com unique composto
-       */
       try {
-        await prisma.instagramPostInsightResult.upsert({
-          where: {
-            postId_baselineWindowDays: {
-              postId: post.id,
-              baselineWindowDays: baselineDays,
-            },
-          },
-          update: {
-            verdict: safeVerdict,
-            score: safeScore,
-            evidence: safeEvidence,
-            why: safeWhy,
-            improve: safeImprove,
-            continue: safeContinue,
-            computedAt: new Date(),
-          },
-          create: {
-            postId: post.id,
-            baselineWindowDays: baselineDays,
-            verdict: safeVerdict,
-            score: safeScore,
-            evidence: safeEvidence,
-            why: safeWhy,
-            improve: safeImprove,
-            continue: safeContinue,
-            // computedAt tem default
-          },
+        await this.postInsightsRepo.upsert({
+          postId: post.id,
+          baselineWindowDays: baselineDays,
+          verdict: safeVerdict,
+          score: safeScore,
+          evidence: safeEvidence,
+          why: safeWhy,
+          improve: safeImprove,
+          continue: safeContinue,
         });
       } catch (e: any) {
-        // ✅ Agora você vê o motivo (sem quebrar a UX do tooltip)
         return res.status(200).json({
           ...data,
           meta: {
@@ -364,9 +359,6 @@ export class InsightsController {
         });
       }
 
-      /**
-       * 6) Retorna pro front
-       */
       return res.status(200).json({
         ...data,
         meta: {

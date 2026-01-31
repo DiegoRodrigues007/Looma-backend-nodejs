@@ -1,5 +1,5 @@
-// src/application/instagram/SetActiveInstagramAccountUseCase.ts
-import { prisma } from "../../../infrastructure/db/prismaClient";
+import { IUserRepository } from "../../ports/db/IUserRepository";
+import { IInstagramAccountRepository } from "../../ports/db/IInstagramAccountRepository";
 
 export type SetActiveInstagramAccountInput = {
   userId: string;
@@ -13,10 +13,6 @@ export type SetActiveInstagramAccountResult =
       account: {
         id: string;
         igUserId: string;
-        username: string | null;
-        accountType: string | null;
-        facebookPageId: string | null;
-        updatedAt: Date;
       };
     }
   | {
@@ -30,6 +26,11 @@ export type SetActiveInstagramAccountResult =
     };
 
 export class SetActiveInstagramAccountUseCase {
+  constructor(
+    private readonly userRepo: IUserRepository,
+    private readonly instagramAccountRepo: IInstagramAccountRepository
+  ) {}
+
   async execute(
     input: SetActiveInstagramAccountInput
   ): Promise<SetActiveInstagramAccountResult> {
@@ -47,23 +48,7 @@ export class SetActiveInstagramAccountUseCase {
       };
     }
 
-    const account = await prisma.instagramAccount.findFirst({
-      where: {
-        id: accId,
-        userId: uid,
-      },
-      select: {
-        id: true,
-        igUserId: true,
-        username: true,
-        accountType: true,
-        facebookPageId: true,
-        isConnected: true,
-        updatedAt: true,
-        accessToken: true,
-        pageAccessToken: true,
-      },
-    });
+    const account = await this.instagramAccountRepo.findConnectedById(uid, accId);
 
     if (!account) {
       return {
@@ -83,21 +68,14 @@ export class SetActiveInstagramAccountUseCase {
       };
     }
 
-    await prisma.user.update({
-      where: { id: uid },
-      data: { activeInstagramAccountId: account.id },
-    });
+    await this.userRepo.setActiveInstagramAccountId(uid, account.id);
 
     return {
       ok: true,
       activeInstagramAccountId: account.id,
       account: {
         id: account.id,
-        igUserId: account.igUserId,
-        username: account.username ?? null,
-        accountType: account.accountType ?? null,
-        facebookPageId: account.facebookPageId ?? null,
-        updatedAt: account.updatedAt,
+        igUserId: account.igUserId ?? "",
       },
     };
   }

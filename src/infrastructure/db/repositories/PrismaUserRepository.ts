@@ -1,13 +1,13 @@
-import { IUserRepository } from "../../../domain/repositories/IUserRepository";
+import { IUserRepository as DomainUserRepository } from "../../../domain/repositories/IUserRepository";
 import { User } from "../../../domain/entities/User";
 import { prisma } from "../prismaClient";
 
-export class PrismaUserRepository implements IUserRepository {
+export class PrismaUserRepository implements DomainUserRepository {
   async findByEmailOrUserName(emailOrUserName: string): Promise<User | null> {
     const row = await prisma.user.findFirst({
       where: {
-        OR: [{ email: emailOrUserName }, { userName: emailOrUserName }]
-      }
+        OR: [{ email: emailOrUserName }, { userName: emailOrUserName }],
+      },
     });
 
     if (!row) return null;
@@ -19,7 +19,7 @@ export class PrismaUserRepository implements IUserRepository {
       name: row.name,
       passwordHash: row.passwordHash,
       createdAt: row.createdAt,
-      updatedAt: row.updatedAt
+      updatedAt: row.updatedAt,
     });
   }
 
@@ -34,8 +34,12 @@ export class PrismaUserRepository implements IUserRepository {
       name: row.name,
       passwordHash: row.passwordHash,
       createdAt: row.createdAt,
-      updatedAt: row.updatedAt
+      updatedAt: row.updatedAt,
     });
+  }
+
+  async getById(id: string): Promise<User | null> {
+    return this.findById(id);
   }
 
   async create(user: User): Promise<void> {
@@ -49,8 +53,30 @@ export class PrismaUserRepository implements IUserRepository {
         name: data.name,
         passwordHash: data.passwordHash,
         createdAt: data.createdAt,
-        updatedAt: data.updatedAt
-      }
+        updatedAt: data.updatedAt,
+      },
+    });
+  }
+
+  async getActiveInstagramAccountId(userId: string): Promise<string | null> {
+    const row = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { activeInstagramAccountId: true },
+    });
+
+    return row?.activeInstagramAccountId ?? null;
+  }
+
+  async setActiveInstagramAccountId(
+    userId: string,
+    instagramAccountId: string
+  ): Promise<void> {
+    await prisma.user.update({
+      where: { id: userId },
+      data: {
+        activeInstagramAccountId: instagramAccountId,
+        updatedAt: new Date(),
+      },
     });
   }
 }

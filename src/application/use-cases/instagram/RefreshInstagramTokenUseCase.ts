@@ -1,4 +1,5 @@
-import type { PrismaClient } from "@prisma/client";
+import { IUserRepository } from "../../ports/db/IUserRepository";
+import { IInstagramAccountRepository } from "../../ports/db/IInstagramAccountRepository";
 import { IInstagramIgLoginAuthService } from "../../ports/instagram/IInstagramIgLoginAuthService";
 import {
   normalizeInstagramToken,
@@ -24,7 +25,7 @@ export type RefreshInstagramTokenInput = {
   userId: string;
   instagramAccountId?: string;
   force?: boolean;
-  refreshIfExpiresBeforeMinutes?: number; 
+  refreshIfExpiresBeforeMinutes?: number;
   currentAccessToken?: string | null;
   currentExpiresAt?: Date | null;
 };
@@ -47,7 +48,8 @@ export type RefreshInstagramTokenOutput =
 
 export class RefreshInstagramTokenUseCase {
   constructor(
-    private readonly prisma: PrismaClient,
+    private readonly userRepo: IUserRepository,
+    private readonly instagramAccountRepo: IInstagramAccountRepository,
     private readonly auth: IInstagramIgLoginAuthService
   ) {}
 
@@ -57,10 +59,14 @@ export class RefreshInstagramTokenUseCase {
     const authAny = this.auth as unknown as {
       refreshLongToken?: (t: string) => Promise<RefreshProviderOutput>;
       refreshLong?: (t: string) => Promise<RefreshProviderOutput>;
+      refreshLongLivedToken?: (t: string) => Promise<RefreshProviderOutput>;
     };
 
     if (typeof authAny.refreshLongToken === "function") {
       return authAny.refreshLongToken.bind(this.auth);
+    }
+    if (typeof authAny.refreshLongLivedToken === "function") {
+      return authAny.refreshLongLivedToken.bind(this.auth);
     }
     if (typeof authAny.refreshLong === "function") {
       return authAny.refreshLong.bind(this.auth);
@@ -75,13 +81,18 @@ export class RefreshInstagramTokenUseCase {
     const fn = this.pickRefreshFn();
     if (!fn) {
       throw new Error(
-        "Auth service não implementa refreshLongToken/refreshLong. Ajuste a implementação do IInstagramIgLoginAuthService."
+        "Auth service não implementa refreshLongToken/refreshLong/refreshLongLivedToken."
       );
     }
 
     const out = await fn(longToken);
-
     return normalizeInstagramToken(out, { fallbackDays: 60 });
+  }
+
+  private normalizeRefreshWindow(v: unknown): number {
+    const n = Number(v);
+    if (!Number.isFinite(n) || n < 0) return 60;
+    return n;
   }
 
   async execute(input: RefreshInstagramTokenInput): Promise<RefreshInstagramTokenOutput> {
@@ -91,20 +102,13 @@ export class RefreshInstagramTokenUseCase {
     }
 
     const force = !!input.force;
+    const refreshWindowMin = this.normalizeRefreshWindow(
+      input.refreshIfExpiresBeforeMinutes ?? 60
+    );
 
-    const refreshWindowMinRaw = Number(input.refreshIfExpiresBeforeMinutes ?? 60);
-    const refreshWindowMin =
-      Number.isFinite(refreshWindowMinRaw) && refreshWindowMinRaw >= 0
-        ? refreshWindowMinRaw
-        : 60;
-
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { activeInstagramAccountId: true },
-    });
-
-    const instagramAccountId =
-      s(input.instagramAccountId) || s(user?.activeInstagramAccountId);
+    // ✅ resolve instagramAccountId: body > active
+    const activeId = await this.userRepo.getActiveInstagramAccountId(userId);
+    const instagramAccountId = s(input.instagramAccountId) || s(activeId);
 
     if (!instagramAccountId) {
       return {
@@ -114,17 +118,8 @@ export class RefreshInstagramTokenUseCase {
       };
     }
 
-    const acc = await this.prisma.instagramAccount.findFirst({
-      where: { id: instagramAccountId, userId },
-      select: {
-        id: true,
-        igUserId: true,
-        accessToken: true,
-        expiresAt: true,
-        isConnected: true,
-        pageAccessToken: true,
-      } as any,
-    });
+    // ✅ precisa buscar a conta MESMO que esteja desconectada (pra retornar NOT_CONNECTED)
+    const acc = await this.instagramAccountRepo.findById(userId, instagramAccountId);
 
     if (!acc) {
       return {
@@ -143,7 +138,7 @@ export class RefreshInstagramTokenUseCase {
       };
     }
 
-    const longToken = s((acc as any).accessToken);
+    const longToken = s(acc.accessToken) || s(input.currentAccessToken);
     if (!longToken) {
       return {
         ok: false,
@@ -154,19 +149,16 @@ export class RefreshInstagramTokenUseCase {
       };
     }
 
-    const expiresAt = safeDate((acc as any).expiresAt);
+    const expiresAt = safeDate(acc.tokenExpiresAt) ?? safeDate(input.currentExpiresAt);
 
-    const shouldRefresh =
-      force ||
-      !expiresAt ||
-      expiresAt <= minutesFromNow(refreshWindowMin);
+    const shouldRefresh = force || !expiresAt || expiresAt <= minutesFromNow(refreshWindowMin);
 
     if (!shouldRefresh) {
       return {
         ok: true,
         refreshed: false,
-        instagramAccountId: String((acc as any).id),
-        igUserId: String((acc as any).igUserId),
+        instagramAccountId: acc.id,
+        igUserId: s(acc.igUserId),
         expiresAt,
         reason: "not_needed",
       };
@@ -175,29 +167,27 @@ export class RefreshInstagramTokenUseCase {
     try {
       const refreshed = await this.refreshToken(longToken);
 
-      const currentPage = s((acc as any).pageAccessToken);
+      // mesma lógica antiga: só sobrescreve page token se ele estiver vazio/invalidado
+      const currentPage = s(acc.pageAccessToken);
       const shouldUpdatePageAccessToken =
         !currentPage ||
         currentPage.toUpperCase() === "EXPIRED_TOKEN" ||
         currentPage.toUpperCase() === "INVALID_TOKEN";
 
-      await this.prisma.instagramAccount.update({
-        where: { id: String((acc as any).id) },
-        data: {
-          accessToken: refreshed.accessToken,
-          pageAccessToken: shouldUpdatePageAccessToken
-            ? refreshed.accessToken
-            : (acc as any).pageAccessToken,
-          expiresAt: refreshed.expiresAt,
-          lastRefreshedAt: new Date(),
-        } as any,
+      await this.instagramAccountRepo.updateToken({
+        instagramAccountId: acc.id,
+        userId,
+        accessToken: refreshed.accessToken,
+        tokenExpiresAt: refreshed.expiresAt,
+        pageAccessToken: shouldUpdatePageAccessToken ? refreshed.accessToken : (acc.pageAccessToken ?? null),
+        lastRefreshedAt: new Date(),
       });
 
       return {
         ok: true,
         refreshed: true,
-        instagramAccountId: String((acc as any).id),
-        igUserId: String((acc as any).igUserId),
+        instagramAccountId: acc.id,
+        igUserId: s(acc.igUserId),
         expiresAt: refreshed.expiresAt,
         reason: force ? "forced" : "near_expiry",
       };

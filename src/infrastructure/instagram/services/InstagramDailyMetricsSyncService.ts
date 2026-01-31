@@ -1,5 +1,5 @@
 import axios from "axios";
-import { prisma } from "../../infrastructure/db/prismaClient";
+import { prisma } from "../../db/prismaClient";
 
 function toUnixStartOfDayUTC(ymd: string) {
   return Math.floor(new Date(`${ymd}T00:00:00.000Z`).getTime() / 1000);
@@ -22,7 +22,7 @@ function toInt(v: any): number {
 type DailyGraphMetrics = {
   reach: number;
   profileViews: number;
-  accountsEngaged: number; // vamos usar como totalInteractions (melhor métrica de “interações” em nível de conta)
+  accountsEngaged: number; 
   followers: number;
 };
 
@@ -30,7 +30,6 @@ export class InstagramDailyMetricsSyncService {
   private readonly baseUrl = process.env.META_GRAPH_BASE_URL ?? "https://graph.facebook.com/v21.0";
 
   private async fetchFollowers(igUserId: string, pageAccessToken: string): Promise<number> {
-    // followers_count costuma funcionar para Professional accounts via IG Graph
     const url = `${this.baseUrl}/${encodeURIComponent(igUserId)}`;
     const { data } = await axios.get(url, {
       params: {
