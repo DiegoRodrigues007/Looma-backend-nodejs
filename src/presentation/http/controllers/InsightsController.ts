@@ -3,7 +3,7 @@ import {
   WeeklyInsightsService,
   TopContentForInsights,
 } from "../../../application/services/insights/WeeklyInsightsService";
-import { InstagramTopContentService } from "../../../infrastructure/instagram/services/InstagramTopContentService";
+import { InstagramTopContentService } from "../../../application/services/instagram/InstagramTopContentService";
 import { PostInsightsOrchestratorService } from "../../../application/services/insights/PostInsightsOrchestratorService";
 
 export type IgCreds = {

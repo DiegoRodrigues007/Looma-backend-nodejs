@@ -1,16 +1,14 @@
-// src/presentation/http/controllers/MetricsController.ts
 import { Request, Response } from "express";
 import { MetricsService } from "../../../application/services/metrics/MetricsService";
-import { PrismaMetricsSnapshotRepository } from "../../../infrastructure/db/repositories/PrismaMetricsSnapshotRepository";
+import { PrismaMetricsSnapshotRepository } from "../../../infrastructure/db/repositories/metrics/PrismaMetricsSnapshotRepository";
 import { MetricsPlatform } from "../../../domain/entities/MetricsSnapshot";
 import { prisma } from "../../../infrastructure/db/prismaClient";
-import { InstagramMetricsService } from "../../../infrastructure/instagram/services/InstagramMetricsService";
+import { InstagramMetricsService } from "../../../application/services/instagram/InstagramMetricsService";
+import { AxiosInstagramMetricsClient } from "../../../infrastructure/instagram/clients/AxiosInstagramMetricsClient";
 import type { AxiosError } from "axios";
 
 export class MetricsController {
-  // =====================================================
-  // Helpers de data (UTC para bater com o repositório)
-  // =====================================================
+
   private startOfDayUTC(date: Date): Date {
     const d = new Date(date);
     d.setUTCHours(0, 0, 0, 0);
@@ -23,57 +21,45 @@ export class MetricsController {
     return d;
   }
 
-  /**
-   * Busca a conta IG correta (a mais recente conectada) + token certo
-   */
   private async getConnectedInstagramAccount(userId: string) {
     const account = await prisma.instagramAccount.findFirst({
       where: { userId, isConnected: true },
-      orderBy: { updatedAt: "desc" }, // ✅ pega sempre a mais recente
+      orderBy: { updatedAt: "desc" }, 
       select: {
-        igUserId: true, // ✅ FIX: era instagramId
+        igUserId: true, 
         accessToken: true,
         pageAccessToken: true,
       },
     });
 
     const igUserId = account?.igUserId ?? null;
-    const accessToken = (account?.pageAccessToken ?? account?.accessToken) ?? null;
+    const accessToken =
+      (account?.pageAccessToken ?? account?.accessToken) ?? null;
 
     return { igUserId, accessToken };
   }
 
-  /**
-   * Pega snapshot em um dia específico; se não existir, pega o mais recente <= esse dia.
-   * (usando findPrevious com "beforeDate = day + 1")
-   */
   private async findSnapshotOnOrBefore(
     repo: PrismaMetricsSnapshotRepository,
     userId: string,
     platform: MetricsPlatform,
     dayUTC: Date
   ) {
-    const exact = await repo.findByDate(userId, platform, dayUTC);
+    const exact = await (repo as any).findByDate(userId, platform, dayUTC);
     if (exact) return exact;
 
-    // ✅ "on or before": busca o último snapshot antes de (day + 1)
-    return repo.findPrevious(userId, platform, this.addDaysUTC(dayUTC, 1));
+    return (repo as any).findPrevious(userId, platform, this.addDaysUTC(dayUTC, 1));
+
   }
 
-  /**
-   * Trata erros comuns do Graph API para respostas mais estáveis:
-   * - 429: rate limit -> 503
-   * - 400/401/403: token inválido/expirado/revogado -> 400
-   *
-   * Retorna true se já respondeu o HTTP e o caller deve "return".
-   */
   private handleInstagramGraphError(res: Response, error: unknown): boolean {
     const anyErr = error as any;
 
-    // AxiosError costuma expor response.status
     const status: number | undefined =
       (anyErr?.response?.status as number | undefined) ??
-      ((anyErr as AxiosError | undefined)?.response?.status as number | undefined);
+      ((anyErr as AxiosError | undefined)?.response?.status as
+        | number
+        | undefined);
 
     if (status === 429) {
       res.status(503).json({
@@ -92,9 +78,11 @@ export class MetricsController {
     return false;
   }
 
-  // =====================================================
-  // SNAPSHOT (1x POR DIA - IDPOTENTE + SEGURO EM CONCORRÊNCIA)
-  // =====================================================
+  private makeInstagramMetricsService() {
+    const metricsClient = new AxiosInstagramMetricsClient();
+    return new InstagramMetricsService(metricsClient);
+  }
+
   async instagramEnsureSnapshot(req: Request, res: Response) {
     try {
       const userId = req.user?.sub;
@@ -102,7 +90,9 @@ export class MetricsController {
 
       const platform: MetricsPlatform = "instagram";
 
-      const { igUserId, accessToken } = await this.getConnectedInstagramAccount(userId);
+      const { igUserId, accessToken } = await this.getConnectedInstagramAccount(
+        userId
+      );
 
       if (!igUserId || !accessToken) {
         return res.status(400).json({
@@ -110,13 +100,12 @@ export class MetricsController {
         });
       }
 
-      // ✅ Snapshot do DIA ATUAL (UTC) — 1x por dia
       const day = this.startOfDayUTC(new Date());
       const dayYmd = day.toISOString().slice(0, 10);
 
       const repo = new PrismaMetricsSnapshotRepository();
+      const igMetricsService = this.makeInstagramMetricsService();
 
-      // ✅ Busca métricas (live) antes de salvar
       let metrics: {
         followers: number;
         reach: number;
@@ -125,20 +114,18 @@ export class MetricsController {
       };
 
       try {
-        metrics = await InstagramMetricsService.fetchDailyMetrics(igUserId, accessToken);
+        metrics = await igMetricsService.fetchDailyMetrics(igUserId, accessToken);
       } catch (err) {
         if (this.handleInstagramGraphError(res, err)) return;
         throw err;
       }
 
-      /**
-       * ✅ IDPOTÊNCIA + CONCORRÊNCIA:
-       * - Não pode ser UPSERT, porque upsert sempre "salva" (cria ou atualiza)
-       * - Precisa ser CREATE-only + capturar unique violation
-       * - Assim: 1 request -> created=true (saved=true)
-       *          concorrente/segunda -> created=false (saved=false)
-       */
-      const created = await repo.createDailyIfNotExists(userId, platform, metrics, day);
+      const created = await (repo as any).createDailyIfNotExists(
+        userId,
+        platform,
+        metrics,
+        day
+      );
 
       if (!created) {
         return res.json({
@@ -160,9 +147,6 @@ export class MetricsController {
     }
   }
 
-  // =====================================================
-  // OVERVIEW (LIVE vs DIA ANTERIOR)
-  // =====================================================
   async instagramOverview(req: Request, res: Response) {
     try {
       const userId = req.user?.sub;
@@ -170,13 +154,17 @@ export class MetricsController {
 
       const platform: MetricsPlatform = "instagram";
 
-      const { igUserId, accessToken } = await this.getConnectedInstagramAccount(userId);
+      const { igUserId, accessToken } = await this.getConnectedInstagramAccount(
+        userId
+      );
 
       if (!igUserId || !accessToken) {
         return res.status(400).json({
           message: "Instagram not connected or missing access token",
         });
       }
+
+      const igMetricsService = this.makeInstagramMetricsService();
 
       let live: {
         followers: number;
@@ -186,7 +174,7 @@ export class MetricsController {
       };
 
       try {
-        live = await InstagramMetricsService.fetchDailyMetrics(igUserId, accessToken);
+        live = await igMetricsService.fetchDailyMetrics(igUserId, accessToken);
       } catch (err) {
         if (this.handleInstagramGraphError(res, err)) return;
         throw err;
@@ -197,7 +185,12 @@ export class MetricsController {
       const today = this.startOfDayUTC(new Date());
       const yesterday = this.addDaysUTC(today, -1);
 
-      const previousSnapshot = await this.findSnapshotOnOrBefore(repo, userId, platform, yesterday);
+      const previousSnapshot = await this.findSnapshotOnOrBefore(
+        repo,
+        userId,
+        platform,
+        yesterday
+      );
 
       if (!previousSnapshot) {
         return res.status(204).send();
@@ -230,9 +223,6 @@ export class MetricsController {
     }
   }
 
-  // =====================================================
-  // PERIOD (?days=7) (LIVE vs snapshot de N dias atrás)
-  // =====================================================
   async instagramPeriod(req: Request, res: Response) {
     try {
       const userId = req.user?.sub;
@@ -240,15 +230,11 @@ export class MetricsController {
 
       const platform: MetricsPlatform = "instagram";
 
-      // ✅ Validação STRICT de input:
-      // - se não vier, default 7
-      // - se vier, tem que ser inteiro positivo (sem decimal/strings)
       let days = 7;
 
       if (req.query.days !== undefined) {
         const raw = String(req.query.days).trim();
 
-        // permite apenas dígitos (sem sinal, sem ponto)
         if (!/^\d+$/.test(raw)) {
           return res.status(400).json({ message: "Invalid 'days' query param" });
         }
@@ -262,13 +248,17 @@ export class MetricsController {
         days = n;
       }
 
-      const { igUserId, accessToken } = await this.getConnectedInstagramAccount(userId);
+      const { igUserId, accessToken } = await this.getConnectedInstagramAccount(
+        userId
+      );
 
       if (!igUserId || !accessToken) {
         return res.status(400).json({
           message: "Instagram not connected or missing access token",
         });
       }
+
+      const igMetricsService = this.makeInstagramMetricsService();
 
       let live: {
         followers: number;
@@ -278,7 +268,7 @@ export class MetricsController {
       };
 
       try {
-        live = await InstagramMetricsService.fetchDailyMetrics(igUserId, accessToken);
+        live = await igMetricsService.fetchDailyMetrics(igUserId, accessToken);
       } catch (err) {
         if (this.handleInstagramGraphError(res, err)) return;
         throw err;
@@ -289,7 +279,12 @@ export class MetricsController {
       const today = this.startOfDayUTC(new Date());
       const targetDay = this.addDaysUTC(today, -days);
 
-      const previousSnapshot = await this.findSnapshotOnOrBefore(repo, userId, platform, targetDay);
+      const previousSnapshot = await this.findSnapshotOnOrBefore(
+        repo,
+        userId,
+        platform,
+        targetDay
+      );
 
       if (!previousSnapshot) {
         return res.status(204).send();

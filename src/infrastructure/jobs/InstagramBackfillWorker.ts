@@ -2,6 +2,15 @@
 import { prisma } from "../db/prismaClient";
 import { RunInstagramBackfillUseCase } from "../../application/use-cases/instagram/RunInstagramBackfillUseCase";
 
+// ✅ DI: repos + client + service
+import { PrismaUserRepository } from "../db/repositories/user/PrismaUserRepository";
+import { PrismaInstagramAccountRepository } from "../db/repositories/instagram/PrismaInstagramAccountRepository";
+import { PrismaInstagramDailyMetricsRepository } from "../db/repositories/instagram/PrismaInstagramDailyMetricsRepository";
+import { PrismaMetricsSnapshotRepository } from "../db/repositories/metrics/PrismaMetricsSnapshotRepository";
+
+import { AxiosInstagramBackfillClient } from "../instagram/clients/AxiosInstagramBackfillClient";
+import { InstagramBackfillService } from "../../application/services/instagram/InstagramBackfillService";
+
 type BackfillJob = {
   jobId: string;
   userId: string;
@@ -361,6 +370,31 @@ export class InstagramBackfillWorker {
 }
 
 /* =========================
+   UseCase Factory (DI)
+========================= */
+
+function makeRunInstagramBackfillUseCase() {
+  const userRepo = new PrismaUserRepository();
+  const instagramAccountRepo = new PrismaInstagramAccountRepository();
+  const dailyMetricsRepo = new PrismaInstagramDailyMetricsRepository();
+  const metricsSnapshotRepo = new PrismaMetricsSnapshotRepository();
+
+  const backfillClient = new AxiosInstagramBackfillClient();
+  const backfillService = new InstagramBackfillService(
+    backfillClient,
+    dailyMetricsRepo
+  );
+
+  return new RunInstagramBackfillUseCase(
+    userRepo,
+    instagramAccountRepo,
+    dailyMetricsRepo,
+    metricsSnapshotRepo,
+    backfillService
+  );
+}
+
+/* =========================
    Singleton + Start helper
 ========================= */
 
@@ -369,7 +403,7 @@ let singleton: InstagramBackfillWorker | null = null;
 export function getInstagramBackfillWorkerSingleton() {
   if (singleton) return singleton;
 
-  singleton = new InstagramBackfillWorker(new RunInstagramBackfillUseCase(), {
+  singleton = new InstagramBackfillWorker(makeRunInstagramBackfillUseCase(), {
     maxParallelJobs: 1,
     jobPollIntervalMs: 1500,
     backfillConcurrency: 2,
@@ -393,7 +427,7 @@ export function startInstagramBackfillWorker(opts?: {
   perPageDelayMs?: number;
 }) {
   if (!singleton) {
-    singleton = new InstagramBackfillWorker(new RunInstagramBackfillUseCase(), {
+    singleton = new InstagramBackfillWorker(makeRunInstagramBackfillUseCase(), {
       maxParallelJobs: Math.max(1, Number(opts?.maxParallelJobs ?? 1) || 1),
       jobPollIntervalMs: Math.max(100, Number(opts?.pollMs ?? 1500) || 1500),
       backfillConcurrency: Math.max(1, Number(opts?.concurrency ?? 2) || 2),

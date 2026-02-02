@@ -3,8 +3,8 @@ import {
   IInstagramIgLoginAuthService,
   InstagramAuthReauthRequired,
   InstagramAuthResolved,
-} from "../../ports/instagram/IInstagramIgLoginAuthService";
-import { IInstagramTokenStore } from "../../instagram/IInstagramTokenStore";
+} from "../../../application/interfaces/instagram/IInstagramIgLoginAuthService";
+import { IInstagramTokenStore } from "../../../application/interfaces/instagram/IInstagramTokenStore";
 
 /**
  * ✅ Store de seleção pendente (porta)

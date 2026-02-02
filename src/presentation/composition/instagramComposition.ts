@@ -1,16 +1,9 @@
 import { InstagramIgLoginClient } from "../../infrastructure/instagram/clients/InstagramIgLoginClient";
-import { InstagramIgLoginAuthService } from "../../infrastructure/instagram/services/InstagramIgLoginAuthService";
-import { PrismaInstagramTokenStore } from "../../infrastructure/db/PrismaInstagramTokenStore";
-
-import { PrismaUserAuthRepository } from "../../infrastructure/db/repositories/PrismaUserAuthRepository";
-
+import { PrismaInstagramTokenStore } from "../../infrastructure/db/repositories/instagram/PrismaInstagramTokenStore";
 import { PrismaInstagramAccountRepository } from "../../infrastructure/db/repositories/instagram/PrismaInstagramAccountRepository";
-import { PrismaUserRepository } from "../../infrastructure/db/repositories/PrismaUserRepository";
-
+import { PrismaUserRepository } from "../../infrastructure/db/repositories/user/PrismaUserRepository";
 import { PrismaInstagramDailyMetricsRepository } from "../../infrastructure/db/repositories/instagram/PrismaInstagramDailyMetricsRepository";
 import { PrismaMetricsSnapshotRepository } from "../../infrastructure/db/repositories/metrics/PrismaMetricsSnapshotRepository";
-
-import { InstagramBackfillService } from "../../infrastructure/instagram/services/InstagramBackfillService";
 
 import {
   CompleteIgLoginUseCase,
@@ -18,19 +11,28 @@ import {
 } from "../../application/use-cases/instagram/CompleteIgLoginUseCase";
 import { ListInstagramAccountsUseCase } from "../../application/use-cases/instagram/ListInstagramAccountsUseCase";
 import { SetActiveInstagramAccountUseCase } from "../../application/use-cases/instagram/SetActiveInstagramAccountUseCase";
-
 import {
   GetInstagramDashboardMetricsUseCase,
   type BackfillDaysFn,
 } from "../../application/use-cases/instagram/GetInstagramDashboardMetricsUseCase";
-
 import { RefreshInstagramTokenUseCase } from "../../application/use-cases/instagram/RefreshInstagramTokenUseCase";
 import { RunInstagramBackfillUseCase } from "../../application/use-cases/instagram/RunInstagramBackfillUseCase";
 
 import { InstagramAuthController } from "../http/controllers/InstagramAuthController";
 
 import { AxiosInstagramGraphClient } from "../../infrastructure/instagram/clients/AxiosInstagramGraphClient";
-import { InstagramTopContentService } from "../../infrastructure/instagram/services/InstagramTopContentService";
+import { InstagramTopContentService } from "../../application/services/instagram/InstagramTopContentService";
+
+import { AxiosInstagramMetricsClient } from "../../infrastructure/instagram/clients/AxiosInstagramMetricsClient";
+import { InstagramMetricsService } from "../../application/services/instagram/InstagramMetricsService";
+
+import { InstagramIgLoginAuthService } from "../../application/services/instagram/InstagramIgLoginAuthService";
+
+import { AxiosInstagramBackfillClient } from "../../infrastructure/instagram/clients/AxiosInstagramBackfillClient";
+import { InstagramBackfillService } from "../../application/services/instagram/InstagramBackfillService";
+
+// ✅ Importa a INTERFACE (tipo) do repo de auth
+import type { IUserAuthRepository } from "../../application/interfaces/db/IUserAuthRepository";
 
 function getAuthenticatedUserId(req: any): string | null {
   const v =
@@ -62,7 +64,8 @@ function envBool(name: string, fallback: boolean): boolean {
 
 class GetInstagramTopContentUseCase {
   constructor(
-    private readonly userAuthRepo: PrismaUserAuthRepository,
+    // ✅ agora tipa como interface correta
+    private readonly userAuthRepo: IUserAuthRepository,
     private readonly tokenStore: PrismaInstagramTokenStore,
     private readonly topContentService: InstagramTopContentService
   ) {}
@@ -76,7 +79,11 @@ class GetInstagramTopContentUseCase {
   }) {
     const userId = String(input.userId ?? "").trim();
     if (!userId) {
-      return { ok: false as const, code: "UNAUTHENTICATED", message: "Não autenticado" };
+      return {
+        ok: false as const,
+        code: "UNAUTHENTICATED",
+        message: "Não autenticado",
+      };
     }
 
     let instagramAccountId = String(input.instagramAccountId ?? "").trim();
@@ -132,14 +139,24 @@ class GetInstagramTopContentUseCase {
 const singleton = {
   igLoginAuthService: null as InstagramIgLoginAuthService | null,
   tokenStore: null as PrismaInstagramTokenStore | null,
-  userAuthRepo: null as PrismaUserAuthRepository | null,
+
+  // ✅ userAuthRepo agora é interface (mas pode ser implementado por PrismaUserRepository)
+  userAuthRepo: null as IUserAuthRepository | null,
+
   userRepo: null as PrismaUserRepository | null,
   instagramAccountRepo: null as PrismaInstagramAccountRepository | null,
+
   dailyMetricsRepo: null as PrismaInstagramDailyMetricsRepository | null,
   metricsSnapshotRepo: null as PrismaMetricsSnapshotRepository | null,
+
+  backfillClient: null as AxiosInstagramBackfillClient | null,
   backfillService: null as InstagramBackfillService | null,
+
   graphClient: null as AxiosInstagramGraphClient | null,
   topContentService: null as InstagramTopContentService | null,
+
+  instagramMetricsClient: null as AxiosInstagramMetricsClient | null,
+  instagramMetricsService: null as InstagramMetricsService | null,
 
   pendingSelectionStore: null as InMemoryInstagramPendingSelectionStore | null,
 };
@@ -157,8 +174,15 @@ export function makeInstagramTokenStore() {
   return singleton.tokenStore;
 }
 
-export function makeUserAuthRepository() {
-  if (!singleton.userAuthRepo) singleton.userAuthRepo = new PrismaUserAuthRepository();
+/**
+ * ✅ Aqui é o ponto principal:
+ * Retorna um IUserAuthRepository (interface), mas instância real pode ser PrismaUserRepository
+ */
+export function makeUserAuthRepository(): IUserAuthRepository {
+  if (!singleton.userAuthRepo) {
+    // PrismaUserRepository precisa ter getAuthDataById(userId)
+    singleton.userAuthRepo = new PrismaUserRepository() as unknown as IUserAuthRepository;
+  }
   return singleton.userAuthRepo;
 }
 
@@ -188,11 +212,6 @@ export function makeMetricsSnapshotRepository() {
   return singleton.metricsSnapshotRepo;
 }
 
-export function makeInstagramBackfillService() {
-  if (!singleton.backfillService) singleton.backfillService = new InstagramBackfillService();
-  return singleton.backfillService;
-}
-
 export function makeInstagramGraphClient() {
   if (!singleton.graphClient) singleton.graphClient = new AxiosInstagramGraphClient();
   return singleton.graphClient;
@@ -204,6 +223,37 @@ export function makeInstagramTopContentService() {
     singleton.topContentService = new InstagramTopContentService(graph);
   }
   return singleton.topContentService;
+}
+
+export function makeInstagramMetricsClient() {
+  if (!singleton.instagramMetricsClient) {
+    singleton.instagramMetricsClient = new AxiosInstagramMetricsClient();
+  }
+  return singleton.instagramMetricsClient;
+}
+
+export function makeInstagramMetricsService() {
+  if (!singleton.instagramMetricsService) {
+    const metricsClient = makeInstagramMetricsClient();
+    singleton.instagramMetricsService = new InstagramMetricsService(metricsClient);
+  }
+  return singleton.instagramMetricsService;
+}
+
+export function makeInstagramBackfillClient() {
+  if (!singleton.backfillClient) {
+    singleton.backfillClient = new AxiosInstagramBackfillClient();
+  }
+  return singleton.backfillClient;
+}
+
+export function makeInstagramBackfillService() {
+  if (!singleton.backfillService) {
+    const client = makeInstagramBackfillClient();
+    const dailyRepo = makeInstagramDailyMetricsRepository();
+    singleton.backfillService = new InstagramBackfillService(client, dailyRepo);
+  }
+  return singleton.backfillService;
 }
 
 export function makeInstagramPendingSelectionStore() {
@@ -226,7 +276,6 @@ export function makeInstagramAuthController(): InstagramAuthController {
 
   const chooseTtlMs = envNumber("IG_LOGIN_CHOOSE_TTL_MS", 10 * 60 * 1000);
   const autoConfirmSingle = envBool("IG_LOGIN_AUTO_CONFIRM_SINGLE", true);
-
   const requireState = envBool("IG_LOGIN_REQUIRE_STATE", true);
 
   const pendingStore = makeInstagramPendingSelectionStore();
@@ -238,7 +287,6 @@ export function makeInstagramAuthController(): InstagramAuthController {
   });
 
   const listAccounts = new ListInstagramAccountsUseCase(userRepo, instagramAccountRepo);
-
   const setActiveAccount = new SetActiveInstagramAccountUseCase(userRepo, instagramAccountRepo);
 
   const backfillDays: BackfillDaysFn = async () => {
@@ -253,7 +301,11 @@ export function makeInstagramAuthController(): InstagramAuthController {
     backfillDays
   );
 
-  const refreshToken = new RefreshInstagramTokenUseCase(userRepo, instagramAccountRepo, authService);
+  const refreshToken = new RefreshInstagramTokenUseCase(
+    userRepo,
+    instagramAccountRepo,
+    authService
+  );
 
   const backfillService = makeInstagramBackfillService();
 
@@ -266,7 +318,11 @@ export function makeInstagramAuthController(): InstagramAuthController {
   );
 
   const topContentService = makeInstagramTopContentService();
-  const getTopContent = new GetInstagramTopContentUseCase(userAuthRepo, tokenStore, topContentService);
+  const getTopContent = new GetInstagramTopContentUseCase(
+    userAuthRepo,
+    tokenStore,
+    topContentService
+  );
 
   let controller: any;
 

@@ -3,7 +3,7 @@ import type {
   IYouTubeTokenStore,
   SaveOrUpdateYouTubeTokenInput,
   YouTubeTokenRecord,
-} from "../../application/youtube/IYouTubeTokenStore";
+} from "../../../../application/youtube/IYouTubeTokenStore";
 
 const prisma = new PrismaClient();
 

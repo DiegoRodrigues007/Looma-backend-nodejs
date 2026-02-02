@@ -1,5 +1,5 @@
-import { IUserRepository } from "../../ports/db/IUserRepository";
-import { IInstagramAccountRepository } from "../../ports/db/IInstagramAccountRepository";
+import { IUserRepository } from "../../interfaces/db/IUserRepository";
+import { IInstagramAccountRepository } from "../../interfaces/db/IInstagramAccountRepository";
 
 export type SetActiveInstagramAccountInput = {
   userId: string;

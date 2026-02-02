@@ -4,7 +4,7 @@ import axios from "axios";
 import type { AxiosError } from "axios";
 
 import { prisma } from "../../../infrastructure/db/prismaClient";
-import { IInstagramIgLoginAuthService } from "../../../application/ports/instagram/IInstagramIgLoginAuthService";
+import { IInstagramIgLoginAuthService } from "../../../application/interfaces/instagram/IInstagramIgLoginAuthService";
 import { CompleteIgLoginUseCase } from "../../../application/use-cases/instagram/CompleteIgLoginUseCase";
 import { ListInstagramAccountsUseCase } from "../../../application/use-cases/instagram/ListInstagramAccountsUseCase";
 import { SetActiveInstagramAccountUseCase } from "../../../application/use-cases/instagram/SetActiveInstagramAccountUseCase";

@@ -3,8 +3,8 @@ import {
   type InstagramTimeseriesPoint,
 } from "../../../domain/metrics/windows/metricsWindows";
 
-import type { IMetricsSnapshotRepository } from "../../ports/db/IMetricsSnapshotRepository";
-import type { IInstagramDailyMetricsRepository } from "../../ports/db/IInstagramDailyMetricsRepository";
+import type { IMetricsSnapshotRepository } from "../../../application/interfaces/db/IMetricsSnapshotRepository";
+import type { IInstagramDailyMetricsRepository } from "../../../application/interfaces/instagram/IInstagramDailyMetricsRepository";
 
 type DailyMetricRow = {
   day: Date;

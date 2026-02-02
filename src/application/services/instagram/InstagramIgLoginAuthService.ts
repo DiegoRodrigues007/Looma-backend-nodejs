@@ -2,8 +2,8 @@ import {
   IInstagramIgLoginAuthService,
   InstagramAuthReauthRequired,
   InstagramAuthResolved,
-} from "../../../application/ports/instagram/IInstagramIgLoginAuthService";
-import { InstagramIgLoginClient } from "../clients/InstagramIgLoginClient";
+} from "../../../application/interfaces/instagram/IInstagramIgLoginAuthService";
+import { InstagramIgLoginClient } from "../../../infrastructure/instagram/clients/InstagramIgLoginClient";
 
 function s(v: unknown): string {
   return String(v ?? "").trim();

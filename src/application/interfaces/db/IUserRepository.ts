@@ -4,11 +4,8 @@ export type UserAuthData = {
 };
 
 export interface IUserRepository {
-
   getById(userId: string): Promise<UserAuthData | null>;
-
   getActiveInstagramAccountId(userId: string): Promise<string | null>;
-
   setActiveInstagramAccountId(
     userId: string,
     instagramAccountId: string

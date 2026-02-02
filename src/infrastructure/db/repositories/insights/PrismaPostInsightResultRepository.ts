@@ -1,8 +1,8 @@
-import { prisma } from "../prismaClient";
+import { prisma } from "../../prismaClient";
 import type {
   IPostInsightResultRepository,
   PersistPostInsightResultParams,
-} from "../../../application/ports/insights/IPostInsightResultRepository";
+} from "../../../../application/interfaces/insights/IPostInsightResultRepository";
 
 export class PrismaPostInsightResultRepository
   implements IPostInsightResultRepository

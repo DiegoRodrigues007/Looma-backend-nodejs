@@ -1,13 +1,13 @@
 import { listDays, ymd } from "../../../shared/date/instagramDateUtils";
 import { toFiniteNumber } from "../../../domain/metrics/instagram/instagramInsightsMapper";
-import type { IUserRepository } from "../../ports/db/IUserRepository";
+import type { IUserRepository } from "../../interfaces/db/IUserRepository";
 import type {
   IInstagramAccountRepository,
   InstagramAccountRecord,
-} from "../../ports/db/IInstagramAccountRepository";
-import type { IInstagramDailyMetricsRepository } from "../../ports/db/IInstagramDailyMetricsRepository";
-import type { IMetricsSnapshotRepository } from "../../ports/db/IMetricsSnapshotRepository";
-import type { IInstagramBackfillService } from "../../ports/instagram/IInstagramBackfillService";
+} from "../../interfaces/db/IInstagramAccountRepository";
+import type { IInstagramDailyMetricsRepository } from "../../interfaces/db/IInstagramDailyMetricsRepository";
+import type { IMetricsSnapshotRepository } from "../../interfaces/db/IMetricsSnapshotRepository";
+import type { IInstagramBackfillService } from "../../interfaces/instagram/IInstagramBackfillService";
 
 function s(v: unknown): string {
   return String(v ?? "").trim();

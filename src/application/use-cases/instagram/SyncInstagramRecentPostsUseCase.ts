@@ -1,10 +1,10 @@
-import type { IUserRepository } from "../../ports/db/IUserRepository";
-import type { IInstagramAccountRepository } from "../../ports/db/IInstagramAccountRepository";
-import type { IInstagramPostRepository } from "../../ports/db/IInstagramPostRepository";
+import type { IUserRepository } from "../../interfaces/db/IUserRepository";
+import type { IInstagramAccountRepository } from "../../interfaces/db/IInstagramAccountRepository";
+import type { IInstagramPostRepository } from "../../interfaces/db/IInstagramPostRepository";
 import type {
   IInstagramGraphClient,
-  IgMediaItem,
-} from "../../ports/instagram/IInstagramGraphClient";
+  InstagramMediaItem,
+} from "../../interfaces/instagram/IInstagramGraphClient";
 
 function s(v: any): string {
   return String(v ?? "").trim();
@@ -20,8 +20,8 @@ function splitScopes(v: any): string[] {
 export type SyncRecentPostsParams = {
   userId: string;
   instagramAccountId?: string | null;
-  limit?: number; 
-  deleteOldBeyondLimit?: boolean; 
+  limit?: number;
+  deleteOldBeyondLimit?: boolean;
 };
 
 export type SyncRecentPostsResult = {
@@ -63,7 +63,6 @@ export class SyncInstagramRecentPostsUseCase {
     const instagramAccountIdUsed = account.id;
 
     const igUserId = s(account.igUserId);
-
     const pageAccessToken = s(account.pageAccessToken) || s(account.accessToken);
 
     if (!igUserId || !pageAccessToken) {
@@ -88,7 +87,7 @@ export class SyncInstagramRecentPostsUseCase {
       }
     }
 
-    const items: IgMediaItem[] = await this.igClient.getRecentMedia({
+    const items: InstagramMediaItem[] = await this.igClient.getRecentMedia({
       igUserId,
       accessToken: pageAccessToken,
       limit,

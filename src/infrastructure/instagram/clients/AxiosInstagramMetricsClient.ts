@@ -1,30 +1,17 @@
 import axios from "axios";
 import type {
-  IInstagramGraphClient,
-  GetMediaReachInput,
-  GetRecentMediaInput,
-  GetRecentMediaOutput,
-  IgMediaItemRaw,
-  InstagramMediaItem,
-} from "../../../application/interfaces/instagram/IInstagramGraphClient";
-import { normalizeInstagramMediaItem } from "../../../application/interfaces/instagram/IInstagramGraphClient";
+  FetchDailyMetricsInput,
+  IInstagramMetricsClient,
+} from "../../../application/interfaces/instagram/IInstagramMetricsClient";
 
 function s(v: any): string {
   return String(v ?? "").trim();
 }
 
 function safeNum(v: unknown): number {
-  const n = Number(v);
+  const n = typeof v === "number" ? v : Number(v);
   return Number.isFinite(n) ? n : 0;
 }
-
-type IgMediaResponseRaw = {
-  data?: IgMediaItemRaw[];
-  paging?: {
-    cursors?: { after?: string };
-    next?: string;
-  };
-};
 
 function isProviderDownAxiosError(err: any, msg: string): boolean {
   const code = s(err?.code).toUpperCase();
@@ -99,72 +86,91 @@ function classifyAndThrowAxiosError(err: any): never {
   throw new Error(msg || "Falha ao chamar provider (Meta)");
 }
 
-export class AxiosInstagramGraphClient implements IInstagramGraphClient {
+type InsightsResponse = {
+  data?: Array<{
+    name?: string;
+    values?: Array<{ value?: unknown }>;
+    total_value?: { value?: unknown };
+    value?: unknown;
+  }>;
+};
+
+function pickMetricValue(body: InsightsResponse, metricName: string): number {
+  const row = Array.isArray(body?.data)
+    ? body.data.find((m) => String(m?.name ?? "") === metricName)
+    : undefined;
+
+  const v =
+    row?.values?.[0]?.value ??
+    row?.total_value?.value ??
+    row?.value ??
+    0;
+
+  return safeNum(v);
+}
+
+export class AxiosInstagramMetricsClient implements IInstagramMetricsClient {
   private readonly graphBaseUrl: string;
 
   constructor(baseUrl?: string) {
     this.graphBaseUrl = (baseUrl ??
-      (process.env.INSTAGRAM_GRAPH_BASE_URL ?? "https://graph.facebook.com/v21.0")
+      process.env.INSTAGRAM_GRAPH_BASE_URL ??
+      "https://graph.facebook.com/v21.0"
     ).replace(/\/+$/, "");
   }
 
-  async getRecentMedia(input: GetRecentMediaInput): Promise<InstagramMediaItem[]> {
-    const out = await this.getRecentMediaPaged(input);
-    return out.data;
-  }
-
-  async getRecentMediaPaged(input: GetRecentMediaInput): Promise<GetRecentMediaOutput> {
-    const { igUserId, accessToken, limit } = input;
-
-    const fields =
-      input.fields ??
-      "id,caption,media_type,media_url,permalink,timestamp,thumbnail_url,like_count,comments_count";
-
-    const url = `${this.graphBaseUrl}/${encodeURIComponent(igUserId)}/media`;
+  async getFollowersCount(input: FetchDailyMetricsInput): Promise<number> {
+    const url = `${this.graphBaseUrl}/${encodeURIComponent(input.instagramAccountId)}`;
 
     try {
       const r = await axios.get(url, {
         params: {
-          fields,
-          limit,
-          access_token: accessToken,
-          ...(input.after ? { after: input.after } : {}),
+          fields: "followers_count",
+          access_token: input.accessToken,
         },
         timeout: input.timeoutMs ?? 15000,
       });
 
-      const body = r.data as IgMediaResponseRaw;
-
-      const rawList = Array.isArray(body?.data) ? body.data : [];
-      const normalized = rawList.map((raw) => normalizeInstagramMediaItem(raw));
-
-      return {
-        data: normalized,
-        paging: body?.paging,
-      };
+      return safeNum((r.data as any)?.followers_count);
     } catch (err: any) {
       classifyAndThrowAxiosError(err);
     }
   }
 
-  async getMediaReach(input: GetMediaReachInput): Promise<number> {
-    const url = `${this.graphBaseUrl}/${encodeURIComponent(input.mediaId)}/insights`;
+  async getDailyReach(input: FetchDailyMetricsInput): Promise<number> {
+    const url = `${this.graphBaseUrl}/${encodeURIComponent(input.instagramAccountId)}/insights`;
 
     try {
       const r = await axios.get(url, {
         params: {
-          access_token: input.accessToken,
           metric: "reach",
+          period: "day",
+          access_token: input.accessToken,
         },
         timeout: input.timeoutMs ?? 15000,
       });
 
-      const reachValue =
-        (r.data as any)?.data?.[0]?.values?.[0]?.value ??
-        (r.data as any)?.data?.[0]?.value ??
-        0;
+      return pickMetricValue(r.data as InsightsResponse, "reach");
+    } catch (err: any) {
+      classifyAndThrowAxiosError(err);
+    }
+  }
 
-      return safeNum(reachValue);
+  async getDailyTotalInteractions(input: FetchDailyMetricsInput): Promise<number> {
+    const url = `${this.graphBaseUrl}/${encodeURIComponent(input.instagramAccountId)}/insights`;
+
+    try {
+      const r = await axios.get(url, {
+        params: {
+          metric: "total_interactions",
+          period: "day",
+          metric_type: "total_value",
+          access_token: input.accessToken,
+        },
+        timeout: input.timeoutMs ?? 15000,
+      });
+
+      return pickMetricValue(r.data as InsightsResponse, "total_interactions");
     } catch (err: any) {
       classifyAndThrowAxiosError(err);
     }

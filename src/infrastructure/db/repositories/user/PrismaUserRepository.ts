@@ -1,6 +1,6 @@
-import { IUserRepository as DomainUserRepository } from "../../../domain/repositories/IUserRepository";
-import { User } from "../../../domain/entities/User";
-import { prisma } from "../prismaClient";
+import { IUserRepository as DomainUserRepository } from "../../../../domain/repositories/IUserRepository";
+import { User } from "../../../../domain/entities/User";
+import { prisma } from "../../prismaClient";
 
 export class PrismaUserRepository implements DomainUserRepository {
   async findByEmailOrUserName(emailOrUserName: string): Promise<User | null> {

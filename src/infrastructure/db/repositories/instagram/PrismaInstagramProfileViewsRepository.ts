@@ -1,6 +1,6 @@
 // src/presentation/http/instagram/instagramProfileViewsRepository.ts
-import { prisma } from "../prismaClient";
-import { ymd, listDays } from "../../../shared/date/instagramDateUtils";
+import { prisma } from "../../prismaClient";
+import { ymd, listDays } from "../../../../shared/date/instagramDateUtils";
 
 function dateOnlyUtcFromYmd(ymdStr: string) {
   const s = String(ymdStr ?? "").slice(0, 10);

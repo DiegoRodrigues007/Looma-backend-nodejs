@@ -1,10 +1,10 @@
-import { IUserRepository } from "../../ports/db/IUserRepository";
-import { IInstagramAccountRepository } from "../../ports/db/IInstagramAccountRepository";
-import { IInstagramIgLoginAuthService } from "../../ports/instagram/IInstagramIgLoginAuthService";
+import { IUserRepository } from "../../interfaces/db/IUserRepository";
+import { IInstagramAccountRepository } from "../../interfaces/db/IInstagramAccountRepository";
+import { IInstagramIgLoginAuthService } from "../../interfaces/instagram/IInstagramIgLoginAuthService";
 import {
   normalizeInstagramToken,
   type RefreshProviderOutput,
-} from "../../instagram/InstagramTokenNormalizer";
+} from "../../interfaces/instagram/InstagramTokenNormalizer";
 
 function s(v: unknown): string {
   return String(v ?? "").trim();

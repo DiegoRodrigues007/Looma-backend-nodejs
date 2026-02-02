@@ -2,9 +2,9 @@ import type {
   IInstagramTokenStore,
   InstagramTokenRecord,
   SaveOrUpdateInstagramTokenInput,
-} from "../../application/instagram/IInstagramTokenStore";
+} from "../../../../application/interfaces/instagram/IInstagramTokenStore";
 
-import { prisma } from "./prismaClient";
+import { prisma } from "../../prismaClient";
 
 function cleanOptString(v: unknown): string | null {
   if (v === undefined || v === null) return null;

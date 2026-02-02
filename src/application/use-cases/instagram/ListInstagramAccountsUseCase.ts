@@ -1,9 +1,8 @@
-import { IUserRepository } from "../../ports/db/IUserRepository";
+import { IUserRepository } from "../../interfaces/db/IUserRepository";
 import {
   IInstagramAccountRepository,
   InstagramAccountListDTO,
-} from "../../ports/db/IInstagramAccountRepository";
-
+} from "../../../application/interfaces/db/IInstagramAccountRepository";
 export type InstagramAccountListItem = InstagramAccountListDTO & {
   isActive: boolean;
 };

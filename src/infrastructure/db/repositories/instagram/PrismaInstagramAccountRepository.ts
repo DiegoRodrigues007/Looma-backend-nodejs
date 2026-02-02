@@ -3,7 +3,7 @@ import type {
   InstagramAccountRecord,
   InstagramAccountListDTO,
   UpdateInstagramAccountTokenInput,
-} from "../../../../application/ports/db/IInstagramAccountRepository";
+} from "../../../../application/interfaces/db/IInstagramAccountRepository";
 import { prisma } from "../../prismaClient";
 
 export class PrismaInstagramAccountRepository

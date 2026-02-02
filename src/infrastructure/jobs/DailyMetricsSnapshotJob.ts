@@ -1,8 +1,8 @@
 import cron from "node-cron";
 import { prisma } from "../db/prismaClient";
-import { PrismaMetricsSnapshotRepository } from "../db/repositories/PrismaMetricsSnapshotRepository";
+import { PrismaMetricsSnapshotRepository } from "../db/repositories/metrics/PrismaMetricsSnapshotRepository";
 import { MetricsHistoryService } from "../../application/services/metrics/MetricsHistoryService";
-import { InstagramMetricsService } from "../instagram/services/InstagramMetricsService";
+import { InstagramMetricsService } from "../../application/services/instagram/InstagramMetricsService";
 
 
 const TZ = "America/Sao_Paulo";

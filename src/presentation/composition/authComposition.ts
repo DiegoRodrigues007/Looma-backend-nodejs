@@ -1,4 +1,4 @@
-import { PrismaUserRepository } from "../../infrastructure/db/repositories/PrismaUserRepository";
+import { PrismaUserRepository } from "../../infrastructure/db/repositories/user/PrismaUserRepository";
 import { BcryptPasswordHasher } from "../../infrastructure/security/BcryptPasswordHasher";
 import { JwtTokenService } from "../../infrastructure/security/JwtTokenService";
 import { RegisterUserUseCase } from "../../application/use-cases/auth/RegisterUserUseCase";

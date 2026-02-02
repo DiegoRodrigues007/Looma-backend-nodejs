@@ -1,4 +1,4 @@
-import type { IInstagramGraphClient } from "../../application/ports/instagram/IInstagramGraphClient";
+import type { IInstagramGraphClient } from "../../../application/interfaces/instagram/IInstagramGraphClient";
 import {
   DateRangeYmd,
   Ymd,
@@ -6,7 +6,7 @@ import {
   DailyInteractionsCalculator,
   InstagramDomainError,
   ConcurrencyPolicy,
-} from "../../domain/instagram";
+} from "../../../domain/instagram";
 
 export type FetchDailyInteractionsByPostsInput = {
   igUserId: string;

@@ -2,11 +2,11 @@ import { PostInsightDataService } from "./PostInsightDataService";
 import { PostInsightRulesService } from "../../../domain/insights/PostInsightRules";
 import type { PostInsightResult } from "../../../domain/insights/PostInsightRules";
 
-import type { IAiNarrator } from "../../ports/ai/IAiNarrator";
+import type { IAiNarrator } from "../../interfaces/ai/IAiNarrator";
 import type { Narrated } from "../../../shared/types/Narrated";
 
-import type { IPostInsightsProvider } from "../../ports/insights/IPostInsightsProvider";
-import type { IPostInsightResultRepository } from "../../ports/insights/IPostInsightResultRepository";
+import type { IPostInsightsProvider } from "../../interfaces/insights/IPostInsightsProvider";
+import type { IPostInsightResultRepository } from "../../../application/interfaces/insights/IPostInsightResultRepository";
 
 type OrchestratorConfig = {
   aiTimeoutMs: number;

@@ -1,4 +1,4 @@
-import type { IInstagramGraphClient } from "../../../application/ports/instagram/IInstagramGraphClient";
+import type { IInstagramGraphClient } from "../../../application/interfaces/instagram/IInstagramGraphClient";
 import {
   DateRangeYmd,
   Ymd,

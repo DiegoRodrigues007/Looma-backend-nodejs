@@ -3,7 +3,7 @@ import type {
   IInstagramPostRepository,
   UpsertRecentFromMediaItemsInput,
   DeleteOldBeyondKeepListInput,
-} from "../../../../application/ports/db/IInstagramPostRepository";
+} from "../../../../application/interfaces/db/IInstagramPostRepository";
 import { prisma } from "../../prismaClient";
 
 function s(v: any): string {

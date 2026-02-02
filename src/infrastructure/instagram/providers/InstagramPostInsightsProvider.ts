@@ -1,10 +1,15 @@
-import type { IPostInsightsProvider } from "../../../application/ports/insights/IPostInsightsProvider";
-import { InstagramPostInsightsService } from "../services/InstagramPostInsightsService";
+import type { IPostInsightsProvider } from "../../../application/interfaces/insights/IPostInsightsProvider";
+import type { IInstagramGraphClient } from "../../../application/interfaces/instagram/IInstagramGraphClient";
+import { InstagramPostInsightsService } from "../../../application/services/instagram/InstagramPostInsightsService";
 
 export class InstagramPostInsightsProvider implements IPostInsightsProvider {
-  constructor(private readonly svc = new InstagramPostInsightsService()) {}
+  private readonly svc: InstagramPostInsightsService;
 
-  fetchPostById(params: { accessToken: string; postId: string }) {
+  constructor(igClient: IInstagramGraphClient) {
+    this.svc = new InstagramPostInsightsService(igClient);
+  }
+
+  fetchPostById(params: { accessToken: string; postId: string; igUserId: string }) {
     return this.svc.fetchPostById(params);
   }
 
