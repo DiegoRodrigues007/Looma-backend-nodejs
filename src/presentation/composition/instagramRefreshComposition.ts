@@ -1,16 +1,24 @@
-// src/presentation/composition/instagramRefreshComposition.ts
+import { PrismaUserRepository } from "../../infrastructure/db/repositories/user/PrismaUserRepository";
+import { PrismaInstagramAccountRepository } from "../../infrastructure/db/repositories/instagram/PrismaInstagramAccountRepository";
 
-import { prisma } from "../../infrastructure/db/prismaClient";
+import { InstagramIgLoginClient } from "../../infrastructure/instagram/clients/InstagramIgLoginClient";
+import { InstagramIgLoginAuthService } from "../../application/services/instagram/InstagramIgLoginAuthService";
 
-import { InstagramRefreshController } from "../http/controllers/InstagramRefreshController";
 import { RefreshInstagramTokenUseCase } from "../../application/use-cases/instagram/RefreshInstagramTokenUseCase";
-import { makeInstagramIgLoginAuthService } from "./instagramComposition";
+import { InstagramRefreshController } from "../http/controllers/instagram/InstagramRefreshController";
 
 export function makeInstagramRefreshController() {
-  const auth = makeInstagramIgLoginAuthService();
+  const userRepo = new PrismaUserRepository();
+  const instagramAccountRepo = new PrismaInstagramAccountRepository();
 
-  // ✅ agora precisa de (prisma, auth)
-  const useCase = new RefreshInstagramTokenUseCase(prisma, auth);
+  const igClient = new InstagramIgLoginClient();
+  const authService = new InstagramIgLoginAuthService(igClient);
+
+  const useCase = new RefreshInstagramTokenUseCase(
+    userRepo,
+    instagramAccountRepo,
+    authService
+  );
 
   return new InstagramRefreshController(useCase);
 }

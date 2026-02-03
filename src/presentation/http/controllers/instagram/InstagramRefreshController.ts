@@ -1,6 +1,6 @@
 // src/presentation/http/controllers/InstagramRefreshController.ts
 import type { Request, Response } from "express";
-import { RefreshInstagramTokenUseCase } from "../../../application/use-cases/instagram/RefreshInstagramTokenUseCase";
+import { RefreshInstagramTokenUseCase } from "../../../../application/use-cases/instagram/RefreshInstagramTokenUseCase";
 
 function s(v: unknown): string {
   return String(v ?? "").trim();

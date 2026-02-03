@@ -2,11 +2,11 @@ import { Request, Response } from "express";
 import { randomBytes, createHash } from "crypto";
 import * as jwt from "jsonwebtoken";
 
-import { RegisterUserUseCase } from "../../../application/use-cases/auth/RegisterUserUseCase";
-import { LoginUserUseCase } from "../../../application/use-cases/auth/LoginUserUseCase";
-import { GetCurrentUserUseCase } from "../../../application/use-cases/auth/GetCurrentUserUseCase";
+import { RegisterUserUseCase } from "../../../../application/use-cases/auth/RegisterUserUseCase";
+import { LoginUserUseCase } from "../../../../application/use-cases/auth/LoginUserUseCase";
+import { GetCurrentUserUseCase } from "../../../../application/use-cases/auth/GetCurrentUserUseCase";
 
-import { prisma } from "../../../infrastructure/db/prismaClient";
+import { prisma } from "../../../../infrastructure/db/prismaClient";
 
 /* =========================
    Helpers

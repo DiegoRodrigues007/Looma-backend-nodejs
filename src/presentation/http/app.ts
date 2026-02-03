@@ -1,4 +1,3 @@
-// src/presentation/http/app.ts
 import express, { NextFunction, Request, Response } from "express";
 import cookieParser from "cookie-parser";
 import axios from "axios";
@@ -18,10 +17,6 @@ import { authMiddleware } from "./middlewares/authMiddleware";
 
 export const app = express();
 
-/* =========================
-   Middlewares básicos
-========================= */
-
 app.use(corsMiddleware);
 
 app.options(/.*/, (_req, res) => {
@@ -30,10 +25,6 @@ app.options(/.*/, (_req, res) => {
 
 app.use(express.json({ limit: "2mb" }));
 app.use(cookieParser());
-
-/* =========================
-   Health / Root
-========================= */
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
@@ -45,47 +36,32 @@ if (process.env.NODE_ENV !== "test") {
   });
 }
 
-/* =========================
-   Routes
-========================= */
-
-// Auth
 app.use("/api/auth", authRouter);
 
-// Instagram base (login, connect etc — pode ficar sem auth)
 app.use("/api/instagram", instagramRouter);
 
-// 🔒 Instagram Backfill (PRECISA DE AUTH)
 app.use(
   "/api/instagram",
   authMiddleware,
   instagramBackfillRoutes
 );
 
-// 🔒 Instagram Posts (sync, list etc — PRECISA DE AUTH)
 app.use(
   "/api/instagram",
   authMiddleware,
   instagramPostsRoutes
 );
 
-// YouTube
 app.use("/api/youtube", youtubeRouter);
 
-// Metrics
 app.use("/api/metrics", authMiddleware, metricsRoutes);
 
-/* =========================
-   Swagger
-========================= */
+
 
 if (process.env.NODE_ENV !== "test") {
   setupSwagger(app);
 }
 
-/* =========================
-   404 handler
-========================= */
 
 app.use((req, res) => {
   res.status(404).json({
@@ -95,9 +71,6 @@ app.use((req, res) => {
   });
 });
 
-/* =========================
-   Error handler
-========================= */
 
 app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
   const status = Number(err?.statusCode || err?.status || 500);

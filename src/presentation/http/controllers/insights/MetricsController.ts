@@ -1,10 +1,10 @@
 import { Request, Response } from "express";
-import { MetricsService } from "../../../application/services/metrics/MetricsService";
-import { PrismaMetricsSnapshotRepository } from "../../../infrastructure/db/repositories/metrics/PrismaMetricsSnapshotRepository";
-import { MetricsPlatform } from "../../../domain/entities/MetricsSnapshot";
-import { prisma } from "../../../infrastructure/db/prismaClient";
-import { InstagramMetricsService } from "../../../application/services/instagram/InstagramMetricsService";
-import { AxiosInstagramMetricsClient } from "../../../infrastructure/instagram/clients/AxiosInstagramMetricsClient";
+import { MetricsService } from "../../../../application/services/metrics/MetricsService";
+import { PrismaMetricsSnapshotRepository } from "../../../../infrastructure/db/repositories/metrics/PrismaMetricsSnapshotRepository";
+import { MetricsPlatform } from "../../../../domain/entities/MetricsSnapshot";
+import { prisma } from "../../../../infrastructure/db/prismaClient";
+import { InstagramMetricsService } from "../../../../application/services/instagram/InstagramMetricsService";
+import { AxiosInstagramMetricsClient } from "../../../../infrastructure/instagram/clients/AxiosInstagramMetricsClient";
 import type { AxiosError } from "axios";
 
 export class MetricsController {

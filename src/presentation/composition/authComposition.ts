@@ -4,7 +4,7 @@ import { JwtTokenService } from "../../infrastructure/security/JwtTokenService";
 import { RegisterUserUseCase } from "../../application/use-cases/auth/RegisterUserUseCase";
 import { LoginUserUseCase } from "../../application/use-cases/auth/LoginUserUseCase";
 import { GetCurrentUserUseCase } from "../../application/use-cases/auth/GetCurrentUserUseCase";
-import { AuthController } from "../http/controllers/AuthController";
+import { AuthController } from "../http/controllers/auth/AuthController";
 
 export function makeAuthController() {
   const userRepo = new PrismaUserRepository();

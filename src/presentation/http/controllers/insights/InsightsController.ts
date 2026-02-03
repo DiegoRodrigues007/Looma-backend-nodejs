@@ -2,9 +2,9 @@ import { Request, Response } from "express";
 import {
   WeeklyInsightsService,
   TopContentForInsights,
-} from "../../../application/services/insights/WeeklyInsightsService";
-import { InstagramTopContentService } from "../../../application/services/instagram/InstagramTopContentService";
-import { PostInsightsOrchestratorService } from "../../../application/services/insights/PostInsightsOrchestratorService";
+} from "../../../../application/services/insights/WeeklyInsightsService";
+import { InstagramTopContentService } from "../../../../application/services/instagram/InstagramTopContentService";
+import { PostInsightsOrchestratorService } from "../../../../application/services/insights/PostInsightsOrchestratorService";
 
 export type IgCreds = {
   igUserId: string;

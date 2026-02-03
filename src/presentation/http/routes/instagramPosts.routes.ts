@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from "express";
 import { authMiddleware } from "../middlewares/authMiddleware";
-import { listInstagramPosts } from "../controllers/InstagramPostsController";
+import { listInstagramPosts } from "../controllers/instagram/InstagramPostsController";
 import { SyncInstagramRecentPostsUseCase } from "../../../application/use-cases/instagram/SyncInstagramRecentPostsUseCase";
 
 const router = Router();

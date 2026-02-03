@@ -1,10 +1,10 @@
 import { Router } from "express";
-import { MetricsController } from "../controllers/MetricsController";
+import { MetricsController } from "../controllers/insights/MetricsController";
 
 // ✅ Insights
 import { PrismaMetricsSnapshotRepository } from "../../../infrastructure/db/repositories/metrics/PrismaMetricsSnapshotRepository";
 import { WeeklyInsightsService } from "../../../application/services/insights/WeeklyInsightsService";
-import { InsightsController } from "../controllers/InsightsController";
+import { InsightsController } from "../controllers/insights/InsightsController";
 
 const router = Router();
 const controller = new MetricsController();

@@ -1,6 +1,6 @@
 // src/presentation/http/controllers/InstagramPostsController.ts
 import { Request, Response } from "express";
-import { prisma } from "../../../infrastructure/db/prismaClient";
+import { prisma } from "../../../../infrastructure/db/prismaClient";
 import { Prisma } from "@prisma/client";
 import axios from "axios";
 
