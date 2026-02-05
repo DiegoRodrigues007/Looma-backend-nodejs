@@ -25,9 +25,12 @@ function mapUseCaseCodeToHttp(code?: string): number {
 export class InstagramAccountsController {
   constructor(
     private readonly listAccounts: ListInstagramAccountsUseCase,
-    private readonly setActiveAccount: SetActiveInstagramAccountUseCase,
+    private readonly setActiveAccount: SetActiveInstagramAccountUseCase
   ) {}
 
+  // =========================
+  // STATUS (conectado? + ativa)
+  // =========================
   async status(req: Request, res: Response) {
     res.setHeader("Cache-Control", "no-store");
 
@@ -62,15 +65,18 @@ export class InstagramAccountsController {
       ? accounts.find((a) => a.id === activeId) ?? null
       : null;
 
+    // Se o usuário não tem ativa, escolhe a mais recente e salva
     if ((!activeId || !active) && accounts.length > 0) {
       active = accounts[0];
       activeId = active.id;
-      try {
-        await prisma.user.update({
+
+      // não precisa derrubar a request se falhar
+      await prisma.user
+        .update({
           where: { id: s(userId) },
           data: { activeInstagramAccountId: activeId },
-        });
-      } catch {}
+        })
+        .catch(() => {});
     }
 
     return safeJson(res, 200, {
@@ -93,6 +99,9 @@ export class InstagramAccountsController {
     });
   }
 
+  // =========================
+  // LISTAR CONTAS CONECTADAS
+  // =========================
   async accounts(req: Request, res: Response) {
     res.setHeader("Cache-Control", "no-store");
 
@@ -101,11 +110,13 @@ export class InstagramAccountsController {
       return safeJson(res, 401, { ok: false, message: "Não autenticado" });
     }
 
+    // Preferir use case se existir
     if (this.listAccounts && typeof (this.listAccounts as any).execute === "function") {
       const out = await (this.listAccounts as any).execute(s(userId));
       return safeJson(res, 200, out);
     }
 
+    // fallback Prisma (mantido)
     const user = await prisma.user.findUnique({
       where: { id: s(userId) },
       select: { activeInstagramAccountId: true },
@@ -132,12 +143,12 @@ export class InstagramAccountsController {
 
     if ((!activeId || !activeExists) && rows.length > 0) {
       activeId = rows[0].id;
-      try {
-        await prisma.user.update({
+      await prisma.user
+        .update({
           where: { id: s(userId) },
           data: { activeInstagramAccountId: activeId },
-        });
-      } catch {}
+        })
+        .catch(() => {});
     }
 
     return safeJson(res, 200, {
@@ -158,6 +169,9 @@ export class InstagramAccountsController {
     });
   }
 
+  // =========================
+  // SETAR CONTA ATIVA
+  // =========================
   async setActive(req: Request, res: Response) {
     res.setHeader("Cache-Control", "no-store");
 
@@ -171,7 +185,7 @@ export class InstagramAccountsController {
     }
 
     const instagramAccountId = s(
-      (req.body as Record<string, unknown>)?.instagramAccountId,
+      (req.body as Record<string, unknown>)?.instagramAccountId
     );
 
     if (!instagramAccountId) {
@@ -182,10 +196,8 @@ export class InstagramAccountsController {
       });
     }
 
-    if (
-      this.setActiveAccount &&
-      typeof (this.setActiveAccount as any).execute === "function"
-    ) {
+    // Preferir use case se existir
+    if (this.setActiveAccount && typeof (this.setActiveAccount as any).execute === "function") {
       const out = await (this.setActiveAccount as any).execute({
         userId: s(userId),
         instagramAccountId,
@@ -198,6 +210,7 @@ export class InstagramAccountsController {
       return safeJson(res, 200, { ok: true, ...out });
     }
 
+    // fallback Prisma (mantido)
     const exists = await prisma.instagramAccount.findFirst({
       where: {
         id: instagramAccountId,
@@ -243,6 +256,9 @@ export class InstagramAccountsController {
     });
   }
 
+  // =========================
+  // DESCONECTAR (desliga tokens)
+  // =========================
   async disconnect(req: Request, res: Response) {
     res.setHeader("Cache-Control", "no-store");
 
@@ -255,7 +271,9 @@ export class InstagramAccountsController {
       });
     }
 
-    const requestedId = s((req.body as Record<string, unknown>)?.instagramAccountId);
+    const requestedId = s(
+      (req.body as Record<string, unknown>)?.instagramAccountId
+    );
 
     const user = await prisma.user.findUnique({
       where: { id: s(userId) },
@@ -264,9 +282,9 @@ export class InstagramAccountsController {
 
     const instagramAccountId = requestedId || s(user?.activeInstagramAccountId);
 
+    // Se não tem conta pra desconectar, 204
     if (!instagramAccountId) {
-      if (!res.headersSent) return res.status(204).send();
-      return;
+      return res.status(204).send();
     }
 
     const acc = await prisma.instagramAccount.findFirst({
@@ -282,6 +300,7 @@ export class InstagramAccountsController {
       });
     }
 
+    // ✅ Melhor prática: desconectar = limpar tokens, mas NÃO apagar facebookPageId/igUserId
     await prisma.instagramAccount.update({
       where: { id: acc.id },
       data: {
@@ -289,15 +308,18 @@ export class InstagramAccountsController {
         accessToken: null,
         pageAccessToken: null,
         expiresAt: null,
-        facebookPageId: null,
+        // facebookPageId: null,  ❌ não apagar identidade
       },
     });
 
-    await prisma.user.update({
-      where: { id: s(userId) },
-      data: { activeInstagramAccountId: null },
-    });
+    // Se estava ativa, limpar ativa
+    if (s(user?.activeInstagramAccountId) === acc.id) {
+      await prisma.user.update({
+        where: { id: s(userId) },
+        data: { activeInstagramAccountId: null },
+      });
+    }
 
-    if (!res.headersSent) return res.status(204).send();
+    return res.status(204).send();
   }
 }

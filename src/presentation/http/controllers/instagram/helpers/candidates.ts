@@ -1,6 +1,3 @@
 export function candidatesOrderBy() {
-  return [
-    { selectedAt: "desc" as const },
-    { createdAt: "desc" as const },
-  ];
+  return [{ createdAt: "asc" as const }];
 }

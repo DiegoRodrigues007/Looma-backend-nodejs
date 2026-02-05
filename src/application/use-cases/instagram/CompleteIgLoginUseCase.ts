@@ -258,7 +258,16 @@ export class CompleteIgLoginUseCase {
       }
       const stHash = sha256Hex(st);
       const savedHash = s(pending.stateHash);
-      if (!savedHash || !safeEq(savedHash, stHash)) {
+
+      // ✅ se requireState=true, stateHash precisa existir
+      if (!savedHash) {
+        throw new CompleteIgLoginError(
+          "INTERNAL_ERROR",
+          "Seleção sem stateHash (inconsistência interna). Refaça o login."
+        );
+      }
+
+      if (!safeEq(savedHash, stHash)) {
         throw new CompleteIgLoginError(
           "INVALID_INPUT",
           "state inválido para esta seleção (possível seleção antiga ou troca de sessão)."
@@ -364,10 +373,40 @@ export class CompleteIgLoginUseCase {
 
     this.cleanupExpired();
 
-    const { shortToken } = await this.auth.exchangeCodeForShortToken(codeS);
-    const { longToken, expiresAt } = await this.auth.exchangeShortForLong(shortToken);
+    let shortToken: string;
+    let longToken: string;
+    let expiresAt: Date | null | undefined;
 
-    const resolved = (await this.auth.resolveMeOrReauth(longToken)) as
+    try {
+      const ex = await this.auth.exchangeCodeForShortToken(codeS);
+      shortToken = s((ex as any)?.shortToken);
+      if (!shortToken) {
+        throw new CompleteIgLoginError("PROVIDER_DOWN", "Falha ao obter shortToken do provedor.");
+      }
+    } catch (e: any) {
+      throw new CompleteIgLoginError(
+        "PROVIDER_DOWN",
+        "Falha ao trocar code por shortToken (provedor indisponível ou credenciais inválidas).",
+        { message: s(e?.message) }
+      );
+    }
+
+    try {
+      const ex2 = await this.auth.exchangeShortForLong(shortToken);
+      longToken = s((ex2 as any)?.longToken);
+      expiresAt = (ex2 as any)?.expiresAt ?? null;
+      if (!longToken) {
+        throw new CompleteIgLoginError("PROVIDER_DOWN", "Falha ao obter longToken do provedor.");
+      }
+    } catch (e: any) {
+      throw new CompleteIgLoginError(
+        "PROVIDER_DOWN",
+        "Falha ao trocar shortToken por longToken (provedor indisponível ou token inválido).",
+        { message: s(e?.message) }
+      );
+    }
+
+    let resolved:
       | InstagramAuthResolved
       | InstagramAuthReauthRequired
       | {
@@ -380,10 +419,20 @@ export class CompleteIgLoginUseCase {
           candidates: any[];
         };
 
+    try {
+      resolved = (await this.auth.resolveMeOrReauth(longToken)) as any;
+    } catch (e: any) {
+      throw new CompleteIgLoginError(
+        "PROVIDER_DOWN",
+        "Falha ao resolver permissões/contas no provedor (resolveMeOrReauth).",
+        { message: s(e?.message) }
+      );
+    }
+
     if ((resolved as any).status === "reauth_required") {
       return {
         status: "reauth_required",
-        loginUrl: (resolved as any).loginUrl,
+        loginUrl: s((resolved as any).loginUrl),
         missingPermissions: (resolved as any).missingPermissions ?? [],
       };
     }
@@ -400,14 +449,15 @@ export class CompleteIgLoginUseCase {
 
     const pending: PendingSelection = {
       userId: userIdS,
-      longToken: s(longToken),
+      longToken,
       expiresAt: expiresAt ?? null,
       createdAt: Date.now(),
       candidates: candidatesRaw.map(normalizeCandidateForDb),
-      stateHash: stateS ? sha256Hex(stateS) : null,
+      // ✅ só grava stateHash quando requireState=true
+      stateHash: this.config.requireState ? sha256Hex(stateS) : null,
     };
 
-    // auto confirma
+    // auto confirma se só 1 candidate
     if (this.config.autoConfirmSingle && pending.candidates.length === 1) {
       const only = pending.candidates[0];
 

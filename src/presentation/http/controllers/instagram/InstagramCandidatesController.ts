@@ -7,31 +7,55 @@ import { s, getAuthenticatedUserId, safeDate } from "./helpers/auth";
 import { safeJson } from "./helpers/http";
 import { candidatesOrderBy } from "./helpers/candidates";
 
-export class InstagramCandidatesController {
-  constructor(
-    private readonly completeLogin: CompleteIgLoginUseCase,
-  ) {}
+import { safeParseState } from "../../instagram/instagramState";
 
+export class InstagramCandidatesController {
+  constructor(private readonly completeLogin: CompleteIgLoginUseCase) {}
+
+  // =========================
+  // LISTAR CANDIDATES
+  // =========================
   async candidates(req: Request, res: Response) {
     res.setHeader("Cache-Control", "no-store");
 
     const userId = getAuthenticatedUserId(req);
-    if (!userId)
+    if (!userId) {
       return safeJson(res, 401, { ok: false, message: "Não autenticado" });
+    }
 
-    let selectionId = s((req.query as any)?.selectionId);
-
+    const selectionId = s((req.query as any)?.selectionId);
     if (!selectionId) {
-      const last = await prisma.instagramCandidate.findFirst({
-        where: { userId: s(userId) },
-        orderBy: candidatesOrderBy(),
-        select: { selectionId: true },
+      return safeJson(res, 400, {
+        ok: false,
+        message: "selectionId é obrigatório",
       });
-      selectionId = s(last?.selectionId);
+    }
+
+    // ✅ FORMA CORRETA: state é obrigatório quando requireState=true
+    const state = s((req.query as any)?.state);
+    if (!state) {
+      return safeJson(res, 400, {
+        ok: false,
+        message: "state é obrigatório",
+      });
+    }
+
+    // ✅ valida assinatura/expiração do state e garante que pertence ao mesmo usuário
+    const parsed = safeParseState(state) as any;
+    const uidFromState = parsed?.uid ? String(parsed.uid) : null;
+
+    if (!uidFromState || uidFromState !== s(userId)) {
+      return safeJson(res, 401, {
+        ok: false,
+        message: "state inválido ou não pertence ao usuário",
+      });
     }
 
     const rows = await prisma.instagramCandidate.findMany({
-      where: { userId: s(userId), ...(selectionId ? { selectionId } : {}) },
+      where: {
+        userId: s(userId),
+        selectionId,
+      },
       orderBy: candidatesOrderBy(),
       take: 50,
       select: {
@@ -50,12 +74,15 @@ export class InstagramCandidatesController {
 
     return safeJson(res, 200, {
       ok: true,
-      selectionId: selectionId || null,
+      selectionId,
       total: rows.length,
       candidates: rows,
     });
   }
 
+  // =========================
+  // CONFIRMAR SELEÇÃO
+  // =========================
   async confirm(req: Request, res: Response) {
     res.setHeader("Cache-Control", "no-store");
 
@@ -63,222 +90,150 @@ export class InstagramCandidatesController {
     if (!userId) {
       return safeJson(res, 401, {
         ok: false,
-        code: "UNAUTHENTICATED",
         message: "Não autenticado",
       });
     }
 
-    const body = req.body as Record<string, unknown>;
+    const { selectionId, igUserIds, state } = req.body as {
+      selectionId?: string;
+      igUserIds?: string[];
+      state?: string;
+    };
 
-    const selectionId = s(body.selectionId);
-    const igUserIdsRaw = body.igUserIds;
-    const candidateIdsRaw = body.candidateIds;
-
-    const igUserIds: string[] = Array.isArray(igUserIdsRaw)
-      ? igUserIdsRaw.map((x) => s(x)).filter(Boolean)
-      : [];
-
-    const candidateIds: string[] = Array.isArray(candidateIdsRaw)
-      ? candidateIdsRaw.map((x) => s(x)).filter(Boolean)
-      : [];
-
-    if (!selectionId) {
+    if (!selectionId || !Array.isArray(igUserIds) || igUserIds.length === 0) {
       return safeJson(res, 400, {
         ok: false,
-        code: "INVALID_INPUT",
-        message: "selectionId é obrigatório",
+        message: "selectionId e igUserIds[] são obrigatórios",
       });
     }
 
-    if (igUserIds.length === 0 && candidateIds.length === 0) {
+    // ✅ FORMA CORRETA: state obrigatório
+    if (!state) {
       return safeJson(res, 400, {
         ok: false,
-        code: "INVALID_INPUT",
-        message: "Envie igUserIds[] (recomendado) ou candidateIds[]",
+        message: "state é obrigatório",
+      });
+    }
+
+    // ✅ valida assinatura/expiração e garante que pertence ao usuário logado
+    const parsed = safeParseState(String(state)) as any;
+    const uidFromState = parsed?.uid ? String(parsed.uid) : null;
+
+    if (!uidFromState || uidFromState !== s(userId)) {
+      return safeJson(res, 401, {
+        ok: false,
+        message: "state inválido ou não pertence ao usuário",
       });
     }
 
     const candidates = await prisma.instagramCandidate.findMany({
-      where: { userId: s(userId), selectionId },
-      orderBy: candidatesOrderBy(),
-      take: 200,
+      where: {
+        userId: s(userId),
+        selectionId,
+        igUserId: { in: igUserIds.map(s) },
+      },
     });
 
-    const selected = candidates.filter((c) => {
-      const byIg = igUserIds.length > 0 ? igUserIds.includes(s(c.igUserId)) : false;
-      const byId = candidateIds.length > 0 ? candidateIds.includes(s(c.id)) : false;
-      return byIg || byId;
-    });
-
-    if (selected.length === 0) {
+    if (candidates.length === 0) {
       return safeJson(res, 404, {
         ok: false,
-        code: "NOT_FOUND",
-        message:
-          "Nenhum candidato encontrado para confirmar (selectionId/seleção inválidos).",
+        message: "Nenhum candidato encontrado para confirmação",
       });
     }
 
-    const selections = selected
-      .map((c) => ({
-        igUserId: s(c.igUserId),
-        facebookPageId: s(c.facebookPageId),
-      }))
-      .filter((x) => x.igUserId && x.facebookPageId);
+    const selections = candidates.map((c) => ({
+      igUserId: s(c.igUserId),
+      facebookPageId: s(c.facebookPageId),
+    }));
 
-    if (selections.length === 0) {
-      return safeJson(res, 400, {
-        ok: false,
-        code: "INVALID_INPUT",
-        message:
-          "Candidatos selecionados não têm igUserId/facebookPageId válidos.",
-      });
-    }
-
-    let results: Array<{
-      igUserId: string;
-      username: string;
-      accountType: string;
-      accessToken: string;
-      expiresAt?: Date | string | null;
-      facebookPageId?: string | null;
-      pageAccessToken?: string | null;
-    }> = [];
-
-    try {
-      results = await this.completeLogin.confirmSelection({
-        selectionId,
-        userId: s(userId),
-        selections,
-      });
-    } catch (e) {
-      const err = e as { message?: string };
-      return safeJson(res, 400, {
-        ok: false,
-        code: "INVALID_INPUT",
-        message: s(err?.message ?? "Falha ao confirmar seleção"),
-      });
-    }
+    // ✅ AJUSTE PRINCIPAL: passar state para bater com requireState=true
+    const results = await this.completeLogin.confirmSelection({
+      selectionId,
+      userId: s(userId),
+      selections,
+      state: String(state),
+    });
 
     if (!results.length) {
       return safeJson(res, 400, {
         ok: false,
-        code: "INVALID_INPUT",
-        message: "Falha ao confirmar seleção (resultado vazio).",
+        message: "Falha ao confirmar seleção",
       });
     }
 
-    const createdOrUpdated: Array<{
-      id: string;
-      igUserId: string;
-      username: string | null;
-      accountType: string | null;
-      facebookPageId: string | null;
-      isConnected: boolean;
-      updatedAt: Date;
-      expiresAt: Date | null;
-    }> = [];
+    const confirmedAccounts: any[] = [];
 
     for (const r of results) {
       const igUserId = s(r.igUserId);
       const facebookPageId = s(r.facebookPageId);
-      const pageAccessToken = s(r.pageAccessToken);
       const accessToken = s(r.accessToken);
+      const pageAccessToken = s(r.pageAccessToken);
 
-      if (!igUserId || !facebookPageId || !pageAccessToken || !accessToken) continue;
-
-      const existing = await prisma.instagramAccount.findFirst({
-        where: { userId: s(userId), igUserId },
-        select: { id: true },
-      });
+      if (!igUserId || !facebookPageId || !accessToken || !pageAccessToken) {
+        continue;
+      }
 
       const expiresAt = safeDate(r.expiresAt);
 
-      const dataToSet: any = {
+      // ✅ BUSCA MANUAL (sem upsert inválido)
+      const existing = await prisma.instagramAccount.findFirst({
+        where: {
+          userId: s(userId),
+          igUserId,
+          facebookPageId,
+        },
+        select: { id: true },
+      });
+
+      const data = {
         userId: s(userId),
         igUserId,
         facebookPageId,
-        pageAccessToken,
         accessToken,
+        pageAccessToken,
         expiresAt,
         username: r.username ? s(r.username) : null,
         accountType: r.accountType ? s(r.accountType) : null,
         isConnected: true,
       };
 
-      const acc = existing?.id
+      const account = existing
         ? await prisma.instagramAccount.update({
             where: { id: existing.id },
-            data: dataToSet,
-            select: {
-              id: true,
-              igUserId: true,
-              username: true,
-              accountType: true,
-              facebookPageId: true,
-              isConnected: true,
-              updatedAt: true,
-              expiresAt: true,
-            },
+            data,
           })
         : await prisma.instagramAccount.create({
-            data: dataToSet,
-            select: {
-              id: true,
-              igUserId: true,
-              username: true,
-              accountType: true,
-              facebookPageId: true,
-              isConnected: true,
-              updatedAt: true,
-              expiresAt: true,
-            },
+            data,
           });
 
-      createdOrUpdated.push(acc);
+      confirmedAccounts.push(account);
 
-      try {
-        await prisma.instagramCandidate.updateMany({
-          where: { userId: s(userId), selectionId, igUserId },
-          data: {
-            selectedAt: new Date(),
-            instagramAccountId: acc.id,
-          },
-        });
-      } catch {}
-    }
-
-    if (createdOrUpdated.length === 0) {
-      return safeJson(res, 400, {
-        ok: false,
-        code: "INVALID_INPUT",
-        message:
-          "Contas confirmadas não puderam ser persistidas (tokens inválidos/ausentes).",
+      await prisma.instagramCandidate.updateMany({
+        where: {
+          userId: s(userId),
+          selectionId,
+          igUserId,
+          facebookPageId,
+        },
+        data: {
+          selectedAt: new Date(),
+          instagramAccountId: account.id,
+        },
       });
     }
 
-    const user = await prisma.user.findUnique({
-      where: { id: s(userId) },
-      select: { activeInstagramAccountId: true },
-    });
-
-    let activeInstagramAccountId = user?.activeInstagramAccountId ?? null;
-
-    if (!activeInstagramAccountId) {
-      activeInstagramAccountId = createdOrUpdated[0].id;
-      try {
-        await prisma.user.update({
-          where: { id: s(userId) },
-          data: { activeInstagramAccountId },
-        });
-      } catch {}
+    if (confirmedAccounts.length > 0) {
+      await prisma.user.update({
+        where: { id: s(userId) },
+        data: { activeInstagramAccountId: confirmedAccounts[0].id },
+      });
     }
 
     return safeJson(res, 200, {
       ok: true,
       selectionId,
-      activeInstagramAccountId,
-      confirmed: createdOrUpdated,
+      activeInstagramAccountId: confirmedAccounts[0]?.id ?? null,
+      confirmed: confirmedAccounts,
     });
   }
 }

@@ -36,32 +36,45 @@ if (process.env.NODE_ENV !== "test") {
   });
 }
 
+/**
+ * =========================
+ * ROTAS OFICIAIS (/api)
+ * =========================
+ */
 app.use("/api/auth", authRouter);
 
 app.use("/api/instagram", instagramRouter);
 
-app.use(
-  "/api/instagram",
-  authMiddleware,
-  instagramBackfillRoutes
-);
+app.use("/api/instagram", authMiddleware, instagramBackfillRoutes);
 
-app.use(
-  "/api/instagram",
-  authMiddleware,
-  instagramPostsRoutes
-);
+app.use("/api/instagram", authMiddleware, instagramPostsRoutes);
 
 app.use("/api/youtube", youtubeRouter);
 
 app.use("/api/metrics", authMiddleware, metricsRoutes);
 
+/**
+ * =========================
+ * COMPATIBILIDADE (SEM /api)
+ * - Necessário se o Swagger chama /instagram/* em vez de /api/instagram/*
+ * - Não quebra nada, só cria "aliases" das rotas
+ * =========================
+ */
+app.use("/auth", authRouter);
 
+app.use("/instagram", instagramRouter);
+
+app.use("/instagram", authMiddleware, instagramBackfillRoutes);
+
+app.use("/instagram", authMiddleware, instagramPostsRoutes);
+
+app.use("/youtube", youtubeRouter);
+
+app.use("/metrics", authMiddleware, metricsRoutes);
 
 if (process.env.NODE_ENV !== "test") {
   setupSwagger(app);
 }
-
 
 app.use((req, res) => {
   res.status(404).json({
@@ -70,7 +83,6 @@ app.use((req, res) => {
     path: req.originalUrl,
   });
 });
-
 
 app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
   const status = Number(err?.statusCode || err?.status || 500);

@@ -23,6 +23,18 @@ const singleton = {
   userRepo: null as PrismaUserRepository | null,
   accountRepo: null as PrismaInstagramAccountRepository | null,
   pendingSelectionStore: null as InMemoryInstagramPendingSelectionStore | null,
+
+  // ✅ faltava manter esses singletons também
+  authService: null as InstagramIgLoginAuthService | null,
+  completeIgLoginUseCase: null as CompleteIgLoginUseCase | null,
+  listAccountsUseCase: null as ListInstagramAccountsUseCase | null,
+  setActiveAccountUseCase: null as SetActiveInstagramAccountUseCase | null,
+
+  // controllers também podem ser singletons (opcional, mas evita recriar e garante consistência)
+  oauthController: null as InstagramOAuthController | null,
+  candidatesController: null as InstagramCandidatesController | null,
+  accountsController: null as InstagramAccountsController | null,
+  metricsController: null as InstagramMetricsController | null,
 };
 
 function makeIgClient() {
@@ -55,82 +67,108 @@ function makeInstagramAccountRepository() {
 
 function makePendingSelectionStore() {
   if (!singleton.pendingSelectionStore) {
-    singleton.pendingSelectionStore =
-      new InMemoryInstagramPendingSelectionStore();
+    singleton.pendingSelectionStore = new InMemoryInstagramPendingSelectionStore();
   }
   return singleton.pendingSelectionStore;
 }
 
 function makeAuthService() {
-  return new InstagramIgLoginAuthService(makeIgClient());
+  if (!singleton.authService) {
+    singleton.authService = new InstagramIgLoginAuthService(makeIgClient());
+  }
+  return singleton.authService;
 }
 
 function makeCompleteIgLoginUseCase() {
-  return new CompleteIgLoginUseCase(
-    makeAuthService(),
-    makeTokenStore(),
-    makePendingSelectionStore(),
-    {
-      chooseTtlMs: Number(process.env.IG_LOGIN_CHOOSE_TTL_MS ?? 10 * 60 * 1000),
-      autoConfirmSingle:
-        String(process.env.IG_LOGIN_AUTO_CONFIRM_SINGLE ?? "true") !== "false",
-      requireState:
-        String(process.env.IG_LOGIN_REQUIRE_STATE ?? "true") !== "false",
-    },
-  );
+  if (!singleton.completeIgLoginUseCase) {
+    singleton.completeIgLoginUseCase = new CompleteIgLoginUseCase(
+      makeAuthService(),
+      makeTokenStore(),
+      makePendingSelectionStore(),
+      {
+        chooseTtlMs: Number(process.env.IG_LOGIN_CHOOSE_TTL_MS ?? 10 * 60 * 1000),
+        autoConfirmSingle:
+          String(process.env.IG_LOGIN_AUTO_CONFIRM_SINGLE ?? "true") !== "false",
+        requireState:
+          String(process.env.IG_LOGIN_REQUIRE_STATE ?? "true") !== "false",
+      }
+    );
+  }
+  return singleton.completeIgLoginUseCase;
 }
 
 function makeListAccountsUseCase() {
-  return new ListInstagramAccountsUseCase(
-    makeUserRepository(),
-    makeInstagramAccountRepository(),
-  );
+  if (!singleton.listAccountsUseCase) {
+    singleton.listAccountsUseCase = new ListInstagramAccountsUseCase(
+      makeUserRepository(),
+      makeInstagramAccountRepository()
+    );
+  }
+  return singleton.listAccountsUseCase;
 }
 
 function makeSetActiveAccountUseCase() {
-  return new SetActiveInstagramAccountUseCase(
-    makeUserRepository(),
-    makeInstagramAccountRepository(),
-  );
+  if (!singleton.setActiveAccountUseCase) {
+    singleton.setActiveAccountUseCase = new SetActiveInstagramAccountUseCase(
+      makeUserRepository(),
+      makeInstagramAccountRepository()
+    );
+  }
+  return singleton.setActiveAccountUseCase;
 }
 
+// =========================
+// CONTROLLERS (singleton)
+// =========================
 
 export function makeInstagramOAuthController() {
-  return new InstagramOAuthController(
-    makeAuthService(),
-    makeCompleteIgLoginUseCase(),
-  );
+  if (!singleton.oauthController) {
+    singleton.oauthController = new InstagramOAuthController(
+      makeAuthService(),
+      makeCompleteIgLoginUseCase()
+    );
+  }
+  return singleton.oauthController;
 }
 
 export function makeInstagramCandidatesController() {
-  return new InstagramCandidatesController(makeCompleteIgLoginUseCase());
+  if (!singleton.candidatesController) {
+    singleton.candidatesController = new InstagramCandidatesController(
+      makeCompleteIgLoginUseCase()
+    );
+  }
+  return singleton.candidatesController;
 }
 
 export function makeInstagramAccountsController() {
-  return new InstagramAccountsController(
-    makeListAccountsUseCase(),
-    makeSetActiveAccountUseCase(),
-  );
+  if (!singleton.accountsController) {
+    singleton.accountsController = new InstagramAccountsController(
+      makeListAccountsUseCase(),
+      makeSetActiveAccountUseCase()
+    );
+  }
+  return singleton.accountsController;
 }
 
 export function makeInstagramMetricsController() {
-  return new InstagramMetricsController();
+  if (!singleton.metricsController) {
+    singleton.metricsController = new InstagramMetricsController();
+  }
+  return singleton.metricsController;
 }
 
-export const makeInstagramActiveAccountController =
-  makeInstagramAccountsController;
+// =========================
+// ALIASES CORRETOS
+// =========================
 
-export const makeInstagramConfirmController =
-  makeInstagramAccountsController;
+// “active account” / status / list / setActive / disconnect => AccountsController
+export const makeInstagramActiveAccountController = makeInstagramAccountsController;
+export const makeInstagramDisconnectController = makeInstagramAccountsController;
 
-export const makeInstagramDisconnectController =
-  makeInstagramAccountsController;
+// confirm + candidates => CandidatesController (antes estava errado)
+export const makeInstagramConfirmController = makeInstagramCandidatesController;
 
-export const makeInstagramRefreshController =
-  makeInstagramMetricsController;
-
-export const makeInstagramBackfillController =
-  makeInstagramMetricsController;
-
-export const makeInstagramTopContentController =
-  makeInstagramMetricsController;
+// refresh/backfill/topcontent => MetricsController (se essas rotas usam ele)
+export const makeInstagramRefreshController = makeInstagramMetricsController;
+export const makeInstagramBackfillController = makeInstagramMetricsController;
+export const makeInstagramTopContentController = makeInstagramMetricsController;
