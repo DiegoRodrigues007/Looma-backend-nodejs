@@ -25,8 +25,22 @@ function safeInt(v: unknown): number {
   return Number.isFinite(n) ? Math.trunc(n) : 0;
 }
 
+/**
+ * ✅ IMPORTANTE:
+ * Para "reach/profileViews/totalInteractions" faz sentido salvar 0 quando não tem dado.
+ * Para "followers" NÃO:
+ * - followers precisa ser null quando não existe registro daquele dia (não inventar).
+ * Então aqui mantemos followers como null quando vier null/undefined.
+ */
 function numOrZero(v: number | null | undefined): number {
   return v == null ? 0 : safeInt(v);
+}
+
+function numOrNull(v: number | null | undefined): number | null {
+  if (v == null) return null;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  return Math.trunc(n);
 }
 
 export class PrismaInstagramDailyMetricsRepository
@@ -68,9 +82,14 @@ export class PrismaInstagramDailyMetricsRepository
 
   async upsertDay(input: UpsertInstagramDailyMetricInput): Promise<void> {
     const day = toDayUtc(input.day);
+
+    // ✅ métricas numéricas: 0 quando vier null/undefined (ok)
     const reach = numOrZero(input.reach);
     const profileViewsTotal = numOrZero(input.profileViewsTotal);
     const totalInteractions = numOrZero(input.totalInteractions);
+
+    // ✅ followers: mantém null quando não tiver dado (correto)
+    const followers = numOrNull(input.followers);
 
     await prisma.instagramAccountDailyMetrics.upsert({
       where: {
@@ -83,13 +102,13 @@ export class PrismaInstagramDailyMetricsRepository
         userId: input.userId,
         instagramAccountId: input.instagramAccountId,
         day,
-        followers: input.followers ?? null,
-        reach, 
-        profileViewsTotal, 
+        followers,
+        reach,
+        profileViewsTotal,
         totalInteractions,
       },
       update: {
-        followers: input.followers ?? null,
+        followers,
         reach,
         profileViewsTotal,
         totalInteractions,
@@ -97,6 +116,10 @@ export class PrismaInstagramDailyMetricsRepository
     });
   }
 
+  /**
+   * Compat para chamadas antigas:
+   * - aceita day como Date ou "YYYY-MM-DD"
+   */
   async upsertDayCompat(args: {
     userId: string;
     instagramAccountId: string;

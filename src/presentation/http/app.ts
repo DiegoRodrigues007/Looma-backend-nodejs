@@ -13,6 +13,8 @@ import metricsRoutes from "./routes/metrics.routes";
 import instagramBackfillRoutes from "./routes/instagramBackfill.routes";
 import instagramPostsRoutes from "./routes/instagramPosts.routes";
 
+import { instagramAnalyticsRouter } from "./routes/instagramAnalytics.routes";
+
 import { authMiddleware } from "./middlewares/authMiddleware";
 
 export const app = express();
@@ -36,14 +38,11 @@ if (process.env.NODE_ENV !== "test") {
   });
 }
 
-/**
- * =========================
- * ROTAS OFICIAIS (/api)
- * =========================
- */
 app.use("/api/auth", authRouter);
 
 app.use("/api/instagram", instagramRouter);
+
+app.use("/api/instagram", instagramAnalyticsRouter);
 
 app.use("/api/instagram", authMiddleware, instagramBackfillRoutes);
 
@@ -53,13 +52,6 @@ app.use("/api/youtube", youtubeRouter);
 
 app.use("/api/metrics", authMiddleware, metricsRoutes);
 
-/**
- * =========================
- * COMPATIBILIDADE (SEM /api)
- * - Necessário se o Swagger chama /instagram/* em vez de /api/instagram/*
- * - Não quebra nada, só cria "aliases" das rotas
- * =========================
- */
 app.use("/auth", authRouter);
 
 app.use("/instagram", instagramRouter);

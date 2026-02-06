@@ -57,6 +57,9 @@ function extractGraphErrorMessage(e: any): string {
  * IMPORTANTE:
  * - Se der erro, lança (não retorna 0).
  * - Isso evita mascarar permissão/token errado.
+ *
+ * Observação importante da API:
+ * - profile_views exige metric_type=total_value (senão dá erro #100)
  */
 async function fetchIgInsightDayMetric(opts: {
   graph: ReturnType<typeof axios.create>;
@@ -76,6 +79,9 @@ async function fetchIgInsightDayMetric(opts: {
         since,
         until,
         access_token: accessToken,
+
+        // ✅ FIX: profile_views precisa disso
+        ...(metric === "profile_views" ? { metric_type: "total_value" } : {}),
       },
     });
 
@@ -83,6 +89,7 @@ async function fetchIgInsightDayMetric(opts: {
     const row = rows.find((x: any) => x?.name === metric);
 
     // Para period=day geralmente vem: values: [{ value, end_time }]
+    // Para alguns casos vem total_value
     const value =
       row?.values?.[0]?.value ??
       row?.total_value?.value ??
@@ -132,8 +139,9 @@ function sumTotalInteractionsForYmd(
   let total = 0;
 
   for (const it of arr) {
-    const ymd = String((it as any).ymd ?? (it as any).day ?? (it as any).date ?? "")
-      .slice(0, 10);
+    const ymd = String(
+      (it as any).ymd ?? (it as any).day ?? (it as any).date ?? ""
+    ).slice(0, 10);
 
     // tenta reconhecer o total em campos comuns
     const maybeTotal =
@@ -205,8 +213,6 @@ export async function runInstagramDailySnapshotsJob(opts?: {
       igUserId: true,
       pageAccessToken: true,
       accessToken: true,
-      // se você tiver accountType salvo, pode incluir aqui pra debug:
-      // accountType: true,
     },
   });
 
@@ -232,7 +238,7 @@ export async function runInstagramDailySnapshotsJob(opts?: {
       });
       const followers = toFiniteNumber(profileRes.data?.followers_count);
 
-      // 2) profile views (Insights day)
+      // 2) profile views (Insights day) ✅ agora com metric_type=total_value internamente
       const profileViewsTotal = await fetchProfileViewsTotalForDay({
         graph,
         igUserId,

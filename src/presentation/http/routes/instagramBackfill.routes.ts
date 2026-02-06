@@ -3,6 +3,10 @@ import { Router } from "express";
 import { prisma } from "../../../infrastructure/db/prismaClient";
 import { authMiddleware } from "../middlewares/authMiddleware";
 import { Prisma } from "@prisma/client";
+import {
+  assertTopology,
+  publish,
+} from "../../../infrastructure/messaging/rabbit"; // ✅ garante topology + publica
 
 const router = Router();
 
@@ -83,6 +87,31 @@ function parseDateOrNull(v: any): Date | null {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
+function clampRangeMaxDays(from: Date, to: Date, maxDays: number) {
+  // normaliza ordem
+  let start = from.getTime() <= to.getTime() ? from : to;
+  let end = from.getTime() <= to.getTime() ? to : from;
+
+  const maxMs = (maxDays - 1) * 24 * 60 * 60 * 1000;
+  const diff = end.getTime() - start.getTime();
+
+  if (diff <= maxMs) return { from: start, to: end };
+
+  // corta pelo final, mantém "to" e puxa "from"
+  const newFrom = new Date(end.getTime() - maxMs);
+  return { from: newFrom, to: end };
+}
+
+// helpers para enviar datas como YYYY-MM-DD (estável p/ analytics)
+function pad2(n: number) {
+  return String(n).padStart(2, "0");
+}
+function ymdUtc(d: Date) {
+  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(
+    d.getUTCDate()
+  )}`;
+}
+
 /**
  * ===========================
  * Swagger/OpenAPI Schemas
@@ -122,9 +151,9 @@ function parseDateOrNull(v: any): Date | null {
  *             Só terá efeito se o worker/implementação usar esse campo.
  *       example:
  *         instagramAccountId: "b3b3b3b3-1111-2222-3333-aaaaaaaaaaaa"
- *         from: "2025-01-01T00:00:00.000Z"
- *         to: "2026-01-24T00:00:00.000Z"
- *         maxPosts: 100
+ *         from: "2026-01-01T00:00:00.000Z"
+ *         to: "2026-01-30T00:00:00.000Z"
+ *         maxPosts: 200
  *
  *     InstagramBackfillStartResponse:
  *       type: object
@@ -193,13 +222,12 @@ function parseDateOrNull(v: any): Date | null {
  *   post:
  *     tags:
  *       - Instagram Backfill
- *     summary: Iniciar backfill de posts antigos do Instagram
+ *     summary: Iniciar backfill de posts do Instagram (assíncrono via worker)
  *     description: >
- *       Cria um job em background para importar posts antigos do Instagram,
- *       buscar métricas por post (reach, saves, shares etc.)
- *       e salvar no banco para geração de insights.
+ *       Cria um job em background para importar posts do Instagram e buscar métricas por post,
+ *       salvando no banco.
  *
- *       ⚠️ O processamento ocorre de forma assíncrona (worker).
+ *       ⚠️ O processamento ocorre de forma assíncrona (worker via RabbitMQ).
  *     security:
  *       - bearerAuth: []
  *     requestBody:
@@ -263,28 +291,21 @@ router.post("/backfill/start", authMiddleware, async (req, res) => {
     });
   }
 
-  // ✅ Agora: Prisma exige from/to/dedupeKey
-  // Se o client mandar, usamos. Se não, usamos defaults seguros:
-  // - from: 90 dias atrás
-  // - to: agora
+  // ✅ range default: últimos 30 dias
+  const now = new Date();
+  const defaultFrom = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+
   const fromBody = parseDateOrNull(req.body?.from);
   const toBody = parseDateOrNull(req.body?.to);
 
-  const now = new Date();
-  const defaultFrom = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+  const { from, to } = clampRangeMaxDays(
+    fromBody ?? defaultFrom,
+    toBody ?? now,
+    30
+  );
 
-  const from = fromBody ?? defaultFrom;
-  const to = toBody ?? now;
+  const dedupeKey = `${instagramAccountId}:${from.toISOString()}:${to.toISOString()}`;
 
-  // Se vier invertido, corrige (evita job inválido)
-  const finalFrom = from.getTime() <= to.getTime() ? from : to;
-  const finalTo = from.getTime() <= to.getTime() ? to : from;
-
-  const dedupeKey = `${instagramAccountId}:${finalFrom.toISOString()}:${finalTo.toISOString()}`;
-
-  // ✅ AJUSTE NECESSÁRIO: idempotência + concorrência
-  // Dois requests simultâneos podem tentar criar o mesmo dedupeKey.
-  // Nesse caso, Prisma lança P2002 (unique constraint) -> buscamos e reaproveitamos.
   let job:
     | Awaited<ReturnType<typeof prisma.instagramBackfillJob.create>>
     | null = null;
@@ -295,11 +316,10 @@ router.post("/backfill/start", authMiddleware, async (req, res) => {
         userId,
         instagramAccountId,
         status: "queued",
-        from: finalFrom,
-        to: finalTo,
+        from,
+        to,
         dedupeKey,
-        // se existir no schema:
-        // maxPosts,
+        // maxPosts: typeof req.body?.maxPosts === "number" ? req.body.maxPosts : null,
       },
     });
   } catch (e: any) {
@@ -307,20 +327,97 @@ router.post("/backfill/start", authMiddleware, async (req, res) => {
       e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002";
 
     if (isP2002) {
-      // ✅ corrida detectada: alguém já criou o job
       const existingByKey = await prisma.instagramBackfillJob.findFirst({
         where: { userId, dedupeKey },
         orderBy: { createdAt: "desc" },
       });
 
-      if (existingByKey) {
-        job = existingByKey as any;
-      }
+      if (existingByKey) job = existingByKey as any;
     }
 
-    if (!job) {
-      throw e;
+    if (!job) throw e;
+  }
+
+  // ✅ PUBLICAR NO RABBITMQ COM PAYLOAD COMPLETO (o worker precisa disso)
+  try {
+    // garante fila/exchange/binds existirem antes de publicar
+    await assertTopology();
+
+    // pega dados necessários para o worker (igUserId + token válido)
+    const acc = await prisma.instagramAccount.findFirst({
+      where: {
+        id: instagramAccountId,
+        userId,
+        isConnected: true,
+      },
+      select: {
+        id: true,
+        igUserId: true,
+        accessToken: true,
+        pageAccessToken: true,
+      },
+    });
+
+    if (!acc?.igUserId) {
+      await prisma.instagramBackfillJob.update({
+        where: { id: job.id },
+        data: {
+          status: "failed",
+          finishedAt: new Date(),
+          lastError: "Conta IG inválida: igUserId ausente",
+        },
+      });
+
+      return res.status(400).json({
+        ok: false,
+        error: "Conta Instagram inválida (igUserId ausente).",
+      });
     }
+
+    const accessToken = acc.pageAccessToken ?? acc.accessToken;
+    if (!accessToken) {
+      await prisma.instagramBackfillJob.update({
+        where: { id: job.id },
+        data: {
+          status: "failed",
+          finishedAt: new Date(),
+          lastError: "Conta IG inválida: token ausente (pageAccessToken/accessToken)",
+        },
+      });
+
+      return res.status(400).json({
+        ok: false,
+        error: "Conta Instagram sem token válido (pageAccessToken/accessToken).",
+      });
+    }
+
+    await publish("ig.analytics.ensure_range", {
+      jobId: job.id,
+      userId,
+      instagramAccountId: acc.id,
+      igUserId: acc.igUserId,
+      accessToken,
+      from: ymdUtc(from),
+      to: ymdUtc(to),
+      // se você for usar no worker:
+      // maxPosts: typeof req.body?.maxPosts === "number" ? req.body.maxPosts : undefined,
+    });
+  } catch (e: any) {
+    // marca como failed para você enxergar no status
+    await prisma.instagramBackfillJob.update({
+      where: { id: job.id },
+      data: {
+        status: "failed",
+        finishedAt: new Date(),
+        lastError: `Falha ao publicar no RabbitMQ: ${String(e?.message ?? e)}`,
+      },
+    });
+
+    return res.status(500).json({
+      ok: false,
+      error: "Falha ao enfileirar job no RabbitMQ",
+      detail: String(e?.message ?? e),
+    });
   }
 
   return res.json({

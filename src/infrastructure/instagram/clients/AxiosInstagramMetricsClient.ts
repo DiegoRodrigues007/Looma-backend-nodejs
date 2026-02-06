@@ -13,12 +13,36 @@ function safeNum(v: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+function ymdFromAny(v: unknown): string {
+  const str = s(v);
+  if (!str) return "";
+  // aceita "YYYY-MM-DD" ou ISO
+  return str.length >= 10 ? str.slice(0, 10) : "";
+}
+
+function toUnixSecondsUtc(ymd: string): number {
+  const d = new Date(`${ymd.slice(0, 10)}T00:00:00.000Z`);
+  return Math.floor(d.getTime() / 1000);
+}
+
+function ymdTodayUtc(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function ymdAddDaysUtc(ymd: string, days: number): string {
+  const d = new Date(`${ymd.slice(0, 10)}T00:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
 function isProviderDownAxiosError(err: any, msg: string): boolean {
   const code = s(err?.code).toUpperCase();
   const noResponse = !err?.response;
 
   const msgHit =
-    /ECONNREFUSED|ECONNRESET|ECONNABORTED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN/i.test(msg) ||
+    /ECONNREFUSED|ECONNRESET|ECONNABORTED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN/i.test(
+      msg
+    ) ||
     /socket hang up/i.test(msg) ||
     /Network Error/i.test(msg) ||
     /timeout/i.test(msg);
@@ -76,7 +100,9 @@ function classifyAndThrowAxiosError(err: any): never {
   }
 
   if (isReauthLikeError(status, msg, data)) {
-    throw new Error(msg ? `reauth required: ${msg}` : "reauth required: permission error");
+    throw new Error(
+      msg ? `reauth required: ${msg}` : "reauth required: permission error"
+    );
   }
 
   if (Number(status) >= 500) {
@@ -86,27 +112,53 @@ function classifyAndThrowAxiosError(err: any): never {
   throw new Error(msg || "Falha ao chamar provider (Meta)");
 }
 
-type InsightsResponse = {
-  data?: Array<{
-    name?: string;
-    values?: Array<{ value?: unknown }>;
-    total_value?: { value?: unknown };
-    value?: unknown;
-  }>;
+type InsightsValueRow = {
+  value?: unknown;
+  end_time?: string; // ISO
 };
 
-function pickMetricValue(body: InsightsResponse, metricName: string): number {
+type InsightsMetricRow = {
+  name?: string;
+  values?: InsightsValueRow[];
+  total_value?: { value?: unknown };
+  value?: unknown;
+};
+
+type InsightsResponse = {
+  data?: InsightsMetricRow[];
+};
+
+function pickMetricRow(body: InsightsResponse, metricName: string) {
   const row = Array.isArray(body?.data)
     ? body.data.find((m) => String(m?.name ?? "") === metricName)
     : undefined;
+  return row;
+}
+
+function pickMetricValue(body: InsightsResponse, metricName: string): number {
+  const row = pickMetricRow(body, metricName);
 
   const v =
-    row?.values?.[0]?.value ??
-    row?.total_value?.value ??
-    row?.value ??
-    0;
+    row?.values?.[0]?.value ?? row?.total_value?.value ?? row?.value ?? 0;
 
   return safeNum(v);
+}
+
+/**
+ * Extrai série diária:
+ * - cada item usa o end_time (ou cai pra "YYYY-MM-DD" do today se não existir)
+ * - value pode ser number OU objeto (ex: {follows, unfollows})
+ */
+function pickMetricSeries(body: InsightsResponse, metricName: string): Array<{
+  date: string;
+  value: unknown;
+}> {
+  const row = pickMetricRow(body, metricName);
+  const values = Array.isArray(row?.values) ? row!.values! : [];
+  return values.map((v) => ({
+    date: ymdFromAny(v?.end_time) || ymdTodayUtc(),
+    value: v?.value,
+  }));
 }
 
 export class AxiosInstagramMetricsClient implements IInstagramMetricsClient {
@@ -119,8 +171,14 @@ export class AxiosInstagramMetricsClient implements IInstagramMetricsClient {
     ).replace(/\/+$/, "");
   }
 
+  // ======================================================
+  // ✅ MÉTODOS EXIGIDOS PELA INTERFACE (mantidos)
+  // ======================================================
+
   async getFollowersCount(input: FetchDailyMetricsInput): Promise<number> {
-    const url = `${this.graphBaseUrl}/${encodeURIComponent(input.instagramAccountId)}`;
+    const url = `${this.graphBaseUrl}/${encodeURIComponent(
+      input.instagramAccountId
+    )}`;
 
     try {
       const r = await axios.get(url, {
@@ -138,7 +196,9 @@ export class AxiosInstagramMetricsClient implements IInstagramMetricsClient {
   }
 
   async getDailyReach(input: FetchDailyMetricsInput): Promise<number> {
-    const url = `${this.graphBaseUrl}/${encodeURIComponent(input.instagramAccountId)}/insights`;
+    const url = `${this.graphBaseUrl}/${encodeURIComponent(
+      input.instagramAccountId
+    )}/insights`;
 
     try {
       const r = await axios.get(url, {
@@ -157,7 +217,9 @@ export class AxiosInstagramMetricsClient implements IInstagramMetricsClient {
   }
 
   async getDailyTotalInteractions(input: FetchDailyMetricsInput): Promise<number> {
-    const url = `${this.graphBaseUrl}/${encodeURIComponent(input.instagramAccountId)}/insights`;
+    const url = `${this.graphBaseUrl}/${encodeURIComponent(
+      input.instagramAccountId
+    )}/insights`;
 
     try {
       const r = await axios.get(url, {
@@ -171,6 +233,108 @@ export class AxiosInstagramMetricsClient implements IInstagramMetricsClient {
       });
 
       return pickMetricValue(r.data as InsightsResponse, "total_interactions");
+    } catch (err: any) {
+      classifyAndThrowAxiosError(err);
+    }
+  }
+
+  // ======================================================
+  // ✅ NOVOS MÉTODOS (para backfill “correto” até 30 dias)
+  // ======================================================
+
+  /**
+   * Tenta buscar a série diária de follower_count (quando a Meta disponibiliza).
+   * - Limitação: normalmente só últimos 30 dias.
+   * - Retorno: [{date, followers}]
+   */
+  async getFollowerCountSeriesLast30Days(input: FetchDailyMetricsInput): Promise<
+    Array<{ date: string; followers: number }>
+  > {
+    const url = `${this.graphBaseUrl}/${encodeURIComponent(
+      input.instagramAccountId
+    )}/insights`;
+
+    // janela: últimos 30 dias (UTC)
+    const untilYmd = ymdTodayUtc();
+    const sinceYmd = ymdAddDaysUtc(untilYmd, -29);
+
+    try {
+      const r = await axios.get(url, {
+        params: {
+          metric: "follower_count",
+          period: "day",
+          since: toUnixSecondsUtc(sinceYmd),
+          until: toUnixSecondsUtc(ymdAddDaysUtc(untilYmd, 1)), // inclui o dia "until"
+          access_token: input.accessToken,
+        },
+        timeout: input.timeoutMs ?? 15000,
+      });
+
+      const series = pickMetricSeries(r.data as InsightsResponse, "follower_count");
+      const out = series
+        .map((p) => ({
+          date: p.date,
+          followers: safeNum(p.value),
+        }))
+        .filter((x) => !!x.date);
+
+      // ordena por data
+      out.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+      return out;
+    } catch (err: any) {
+      classifyAndThrowAxiosError(err);
+    }
+  }
+
+  /**
+   * Tenta buscar "follows_and_unfollows" diário (quando disponível/permissão ok).
+   * Retorno: [{date, follows, unfollows}]
+   *
+   * OBS: A Meta pode retornar "gaps" (dias faltando). Isso é esperado.
+   */
+  async getFollowsAndUnfollowsLast30Days(input: FetchDailyMetricsInput): Promise<
+    Array<{ date: string; follows: number; unfollows: number }>
+  > {
+    const url = `${this.graphBaseUrl}/${encodeURIComponent(
+      input.instagramAccountId
+    )}/insights`;
+
+    const untilYmd = ymdTodayUtc();
+    const sinceYmd = ymdAddDaysUtc(untilYmd, -29);
+
+    try {
+      const r = await axios.get(url, {
+        params: {
+          metric: "follows_and_unfollows",
+          period: "day",
+          since: toUnixSecondsUtc(sinceYmd),
+          until: toUnixSecondsUtc(ymdAddDaysUtc(untilYmd, 1)),
+          access_token: input.accessToken,
+        },
+        timeout: input.timeoutMs ?? 15000,
+      });
+
+      const series = pickMetricSeries(
+        r.data as InsightsResponse,
+        "follows_and_unfollows"
+      );
+
+      const out = series
+        .map((p) => {
+          const v = p.value as any;
+
+          // a Meta pode retornar number, object, etc — aqui a gente trata com segurança
+          const follows = safeNum(v?.follows ?? v?.follow ?? v?.in ?? v ?? 0);
+          const unfollows = safeNum(
+            v?.unfollows ?? v?.unfollow ?? v?.out ?? 0
+          );
+
+          return { date: p.date, follows, unfollows };
+        })
+        .filter((x) => !!x.date);
+
+      out.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+      return out;
     } catch (err: any) {
       classifyAndThrowAxiosError(err);
     }
