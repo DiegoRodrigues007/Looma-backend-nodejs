@@ -3,6 +3,7 @@ import { Router } from "express";
 import { authMiddleware } from "../middlewares/authMiddleware";
 
 import {
+  getInstagramGrowthAnalytics,
   getInstagramEngagementAnalytics,
   getInstagramCorrelationAnalytics,
   getInstagramContentAnalytics,
@@ -22,6 +23,54 @@ const router = Router();
  */
 
 router.use(authMiddleware);
+
+/**
+ * @openapi
+ * /api/instagram/analytics/growth:
+ *   get:
+ *     tags:
+ *       - Instagram Analytics
+ *     summary: Análise de Crescimento (profile views, interações, novos seguidores)
+ *     description: |
+ *       Retorna as métricas de crescimento da conta no período selecionado no calendário:
+ *       - Visualizações no perfil (profile views)
+ *       - Interações (total interactions)
+ *       - Novos seguidores (delta no período)
+ *
+ *       Além dos totais do período, retorna a série diária para alimentar o gráfico.
+ *
+ *       - Range máximo: 30 dias
+ *       - Datas em formato YYYY-MM-DD
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: from
+ *         required: true
+ *         schema:
+ *           type: string
+ *           example: "2026-01-01"
+ *       - in: query
+ *         name: to
+ *         required: true
+ *         schema:
+ *           type: string
+ *           example: "2026-01-30"
+ *       - in: query
+ *         name: instagramAccountId
+ *         required: false
+ *         schema:
+ *           type: string
+ *           example: "963930d3-3ab5-45c7-ab74-93071128769f"
+ *     responses:
+ *       200:
+ *         description: Métricas de crescimento do período
+ *       400:
+ *         description: Parâmetros inválidos
+ *       401:
+ *         description: Não autenticado
+ */
+router.get("/analytics/growth", getInstagramGrowthAnalytics);
 
 /**
  * @openapi

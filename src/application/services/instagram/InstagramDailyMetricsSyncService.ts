@@ -29,12 +29,58 @@ function compareYmd(a: string, b: string) {
   return a.localeCompare(b);
 }
 
+function parseYmdToUtcDate(ymdStr: string) {
+  return new Date(`${ymdStr}T00:00:00.000Z`);
+}
+
+type UpsertPayload = {
+  userId: string;
+  instagramAccountId: string;
+  dayYmd: string; // YYYY-MM-DD
+  followers: number;
+  reach: number;
+  profileViewsTotal: number;
+  totalInteractions: number;
+};
+
 export class InstagramDailyMetricsSyncService {
   constructor(
     private readonly accountResolver: IInstagramAccountResolver,
     private readonly client: IInstagramDailyMetricsClient,
     private readonly repo: IInstagramDailyMetricsRepository,
   ) {}
+
+  private async persistDay(payload: UpsertPayload) {
+    const repoAny = this.repo as any;
+
+    if (typeof repoAny.upsertDay === "function") {
+      return repoAny.upsertDay({
+        userId: payload.userId,
+        instagramAccountId: payload.instagramAccountId,
+        day: parseYmdToUtcDate(payload.dayYmd),
+        followers: payload.followers,
+        reach: payload.reach,
+        profileViewsTotal: payload.profileViewsTotal,
+        totalInteractions: payload.totalInteractions,
+      });
+    }
+
+    if (typeof repoAny.upsertDayCompat === "function") {
+      return repoAny.upsertDayCompat({
+        userId: payload.userId,
+        instagramAccountId: payload.instagramAccountId,
+        day: payload.dayYmd,
+        followers: payload.followers,
+        reach: payload.reach,
+        profileViewsTotal: payload.profileViewsTotal,
+        totalInteractions: payload.totalInteractions,
+      });
+    }
+
+    throw new Error(
+      "IInstagramDailyMetricsRepository: nenhum método de upsert disponível (esperado: upsertDay ou upsertDayCompat)",
+    );
+  }
 
   async syncDayForAccount(params: {
     userId: string;
@@ -47,18 +93,18 @@ export class InstagramDailyMetricsSyncService {
     const instagramAccountId = s(params.instagramAccountId);
     const igUserId = s(params.igUserId);
     const pageAccessToken = s(params.pageAccessToken);
-    const dayYmd = ymd(params.dayYmd);
+    const dayYmdStr = ymd(params.dayYmd);
 
     if (
       !userId ||
       !instagramAccountId ||
       !igUserId ||
       !pageAccessToken ||
-      !dayYmd
+      !dayYmdStr
     ) {
       throw new Error("syncDayForAccount: parâmetros inválidos");
     }
-    if (!isValidYmd(dayYmd)) {
+    if (!isValidYmd(dayYmdStr)) {
       throw new Error("syncDayForAccount: dayYmd inválido (use YYYY-MM-DD)");
     }
 
@@ -71,30 +117,36 @@ export class InstagramDailyMetricsSyncService {
       this.client.getInsightsForDay({
         igUserId,
         accessToken: pageAccessToken,
-        dayYmd,
+        dayYmd: dayYmdStr,
         timeoutMs: 20000,
       }),
     ]);
 
     const followers = safeInt(followersRaw);
 
-    await this.repo.upsertDailyMetrics({
+    const reach = safeInt(insights.reach);
+    const profileViewsTotal = safeInt(insights.profileViews);
+
+    const totalInteractions = safeInt(insights.accountsEngaged);
+
+    await this.persistDay({
       userId,
       instagramAccountId,
-      dayYmd,
+      dayYmd: dayYmdStr,
       followers,
-      reach: safeInt(insights.reach),
-      profileViewsTotal: safeInt(insights.profileViews),
-      totalInteractions: safeInt(insights.accountsEngaged),
+      reach,
+      profileViewsTotal,
+      totalInteractions,
     });
 
     return {
       ok: true as const,
-      day: dayYmd,
+      day: dayYmdStr,
       followers,
-      reach: safeInt(insights.reach),
-      profileViews: safeInt(insights.profileViews),
+      reach,
+      profileViews: profileViewsTotal,
       accountsEngaged: safeInt(insights.accountsEngaged),
+      totalInteractions,
     };
   }
 
@@ -131,14 +183,14 @@ export class InstagramDailyMetricsSyncService {
     }
 
     const results: any[] = [];
-    for (const dayYmd of days) {
+    for (const dayYmdStr of days) {
       results.push(
         await this.syncDayForAccount({
           userId,
           instagramAccountId: account.id,
           igUserId: account.igUserId,
           pageAccessToken: account.pageAccessToken,
-          dayYmd,
+          dayYmd: dayYmdStr,
         }),
       );
     }

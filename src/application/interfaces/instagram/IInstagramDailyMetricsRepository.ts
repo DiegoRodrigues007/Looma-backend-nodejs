@@ -9,13 +9,14 @@ export type InstagramDailyMetricRow = {
 export type ListInstagramDailyMetricsByRangeInput = {
   readonly userId: string;
   readonly instagramAccountId: string;
-  readonly from: Date;
-  readonly to: Date;
+  readonly from: Date; // inclusive (UTC)
+  readonly to: Date;   // inclusive (UTC)
 };
 
 export type UpsertInstagramDailyMetricInput = {
   readonly userId: string;
   readonly instagramAccountId: string;
+
   readonly day: Date;
 
   readonly followers: number | null;
@@ -27,12 +28,12 @@ export type UpsertInstagramDailyMetricInput = {
 export interface IInstagramDailyMetricsRepository {
 
   listByRange(
-    args: ListInstagramDailyMetricsByRangeInput
+    args: ListInstagramDailyMetricsByRangeInput,
   ): Promise<InstagramDailyMetricRow[]>;
 
   upsertDay(input: UpsertInstagramDailyMetricInput): Promise<void>;
 
   upsertDailyMetrics?(
-    input: UpsertInstagramDailyMetricInput[]
+    input: ReadonlyArray<UpsertInstagramDailyMetricInput>,
   ): Promise<void>;
 }

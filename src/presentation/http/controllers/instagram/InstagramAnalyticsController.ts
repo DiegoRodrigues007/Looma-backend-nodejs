@@ -87,7 +87,7 @@ function formatPostDateLabel(date: Date): string {
 }
 
 function dayKeyPtBr(
-  date: Date
+  date: Date,
 ): "seg" | "ter" | "qua" | "qui" | "sex" | "sab" | "dom" {
   const wd = new Intl.DateTimeFormat("pt-BR", {
     timeZone: "America/Sao_Paulo",
@@ -114,7 +114,7 @@ function hourLabel(date: Date): string {
 }
 
 function toPostType(
-  mediaType: string | null | undefined
+  mediaType: string | null | undefined,
 ): "reel" | "feed" | "carousel" {
   const t = String(mediaType ?? "").toUpperCase();
   if (t === "REELS") return "reel";
@@ -223,7 +223,7 @@ async function ensurePostsAndMetricsInRange(opts: {
 
   const maxPosts = Math.max(
     50,
-    Math.min(800, Number(opts.maxPosts ?? 500) || 500)
+    Math.min(800, Number(opts.maxPosts ?? 500) || 500),
   );
 
   const fromMs = parseYmdToUtcStart(from).getTime();
@@ -396,6 +396,177 @@ async function ensurePostsAndMetricsInRange(opts: {
   return { ensuredPosts: items.length, ensuredMetrics };
 }
 
+/**
+ * ✅ NOVO: Análise de Crescimento (igual painel do Instagram)
+ * - profile views (soma profileViewsTotal)
+ * - interações (soma totalInteractions)
+ * - novos seguidores (followers_last - followers_first)
+ * - daily series para o gráfico
+ */
+export async function getInstagramGrowthAnalytics(req: Request, res: Response) {
+  try {
+    res.setHeader("Cache-Control", "no-store");
+
+    const userId = getUserId(req);
+    if (!userId)
+      return res.status(401).json({ ok: false, message: "Não autenticado" });
+
+    const fromRaw = s(req.query.from);
+    const toRaw = s(req.query.to);
+    const requestedAccountId = s(req.query.instagramAccountId);
+
+    if (!isValidYmd(fromRaw) || !isValidYmd(toRaw)) {
+      return res
+        .status(400)
+        .json({ ok: false, message: "from/to inválidos (YYYY-MM-DD)" });
+    }
+    if (fromRaw > toRaw) {
+      return res.status(400).json({ ok: false, message: "Range inválido" });
+    }
+
+    const clamped = clampDaysRange(fromRaw, toRaw, 30);
+    const from = clamped.from;
+    const to = clamped.to;
+
+    const account = await resolveInstagramAccount(userId, requestedAccountId);
+    if (!account?.id) {
+      return res.json({
+        ok: true,
+        instagramAccountId: null,
+        filters: { from, to },
+        kpis: { profileViews: 0, interactions: 0, newFollowers: 0 },
+        daily: listDays(from, to).map((d) => ({
+          day: d,
+          profileViews: 0,
+          interactions: 0,
+          followers: null as number | null,
+          followersDelta: 0,
+        })),
+        message: "Nenhuma conta do Instagram conectada",
+      });
+    }
+
+    // Busca as métricas diárias já salvas no banco
+    const rows = await prisma.instagramAccountDailyMetrics.findMany({
+      where: {
+        userId,
+        instagramAccountId: account.id,
+        day: {
+          gte: parseYmdToUtcStart(from),
+          lte: parseYmdToUtcEnd(to),
+        },
+      },
+      orderBy: { day: "asc" },
+      select: {
+        day: true,
+        followers: true,
+        reach: true,
+        profileViewsTotal: true,
+        totalInteractions: true,
+      },
+    });
+
+    // Map por dia (YYYY-MM-DD) para preencher série completa
+    const byDay = new Map<
+      string,
+      {
+        followers: number | null;
+        profileViewsTotal: number;
+        totalInteractions: number;
+      }
+    >();
+
+    for (const r of rows) {
+      const d = r.day instanceof Date ? r.day : new Date(r.day as any);
+      const dayKey = d.toISOString().slice(0, 10);
+
+      byDay.set(dayKey, {
+        followers: r.followers ?? null,
+        profileViewsTotal: Math.trunc(safeNum(r.profileViewsTotal)),
+        totalInteractions: Math.trunc(safeNum(r.totalInteractions)),
+      });
+    }
+
+    // KPIs do período (somatório)
+    const profileViews = rows.reduce(
+      (acc, r) => acc + Math.trunc(safeNum(r.profileViewsTotal)),
+      0,
+    );
+    const interactions = rows.reduce(
+      (acc, r) => acc + Math.trunc(safeNum(r.totalInteractions)),
+      0,
+    );
+
+    // Novos seguidores no período: lastFollowers - firstFollowers (apenas dias com followers != null)
+    const followersSeries = rows
+      .map((r) => ({
+        day: (r.day as Date).toISOString().slice(0, 10),
+        followers: r.followers,
+      }))
+      .filter((x) => x.followers !== null && x.followers !== undefined) as Array<{
+      day: string;
+      followers: number;
+    }>;
+
+    const firstFollowers =
+      followersSeries.length > 0 ? followersSeries[0].followers : null;
+    const lastFollowers =
+      followersSeries.length > 0
+        ? followersSeries[followersSeries.length - 1].followers
+        : null;
+
+    const newFollowers =
+      firstFollowers !== null && lastFollowers !== null
+        ? Math.trunc(lastFollowers - firstFollowers)
+        : 0;
+
+    // Série diária completa
+    const days = listDays(from, to);
+    let prevFollowers: number | null = null;
+
+    const daily = days.map((day) => {
+      const v = byDay.get(day);
+
+      const followers = v?.followers ?? null;
+      const followersDelta =
+        followers !== null && prevFollowers !== null
+          ? Math.trunc(followers - prevFollowers)
+          : 0;
+
+      // atualiza prevFollowers só quando houver dado válido
+      if (followers !== null) prevFollowers = followers;
+
+      return {
+        day,
+        profileViews: v?.profileViewsTotal ?? 0,
+        interactions: v?.totalInteractions ?? 0,
+        followers,
+        followersDelta,
+      };
+    });
+
+    return res.json({
+      ok: true,
+      instagramAccountId: account.id,
+      filters: { from, to },
+      kpis: {
+        profileViews: Math.trunc(profileViews),
+        interactions: Math.trunc(interactions),
+        newFollowers: Math.trunc(newFollowers),
+        firstFollowers,
+        lastFollowers,
+      },
+      daily,
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      ok: false,
+      message: "Falha ao gerar análise de crescimento",
+      detail: String(error?.message ?? error),
+    });
+  }
+}
+
 export async function getInstagramContentAnalytics(req: Request, res: Response) {
   try {
     res.setHeader("Cache-Control", "no-store");
@@ -508,7 +679,7 @@ export async function getInstagramContentAnalytics(req: Request, res: Response) 
       const views = Math.max(
         safeNum(m?.reach),
         safeNum(m?.plays),
-        safeNum(m?.videoViews)
+        safeNum(m?.videoViews),
       );
       const likes = Math.trunc(safeNum(m?.likes ?? p.likeCount));
       const comments = Math.trunc(safeNum(m?.comments ?? p.commentsCount));
@@ -554,7 +725,10 @@ export async function getInstagramContentAnalytics(req: Request, res: Response) 
   }
 }
 
-export async function getInstagramEngagementAnalytics(req: Request, res: Response) {
+export async function getInstagramEngagementAnalytics(
+  req: Request,
+  res: Response,
+) {
   try {
     res.setHeader("Cache-Control", "no-store");
 
@@ -671,7 +845,10 @@ export async function getInstagramEngagementAnalytics(req: Request, res: Respons
   }
 }
 
-export async function getInstagramCorrelationAnalytics(req: Request, res: Response) {
+export async function getInstagramCorrelationAnalytics(
+  req: Request,
+  res: Response,
+) {
   try {
     res.setHeader("Cache-Control", "no-store");
 
@@ -766,7 +943,7 @@ export async function getInstagramCorrelationAnalytics(req: Request, res: Respon
           (safeNum(m?.likes) +
             safeNum(m?.comments) +
             safeNum(m?.saves) +
-            safeNum(m?.shares))
+            safeNum(m?.shares)),
       );
 
       if (reach <= 0) continue;
