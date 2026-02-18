@@ -10,6 +10,9 @@ import {
   type EnsureRangeProgress,
 } from "./application/services/analytics/ensurePostsAndMetricsInRange";
 
+/**
+ * Payload recebido da fila.
+ */
 type EnsureRangeJobPayload = {
   jobId: string;
   userId: string;
@@ -24,42 +27,57 @@ function isNonEmptyString(v: any): v is string {
   return typeof v === "string" && v.trim().length > 0;
 }
 
-function asYmdOrThrow(v: any, field: string): string {
+function asNonEmptyStringOrThrow(v: any, field: string): string {
   if (!isNonEmptyString(v)) throw new Error(`Payload inválido: ${field} ausente`);
-  // validação simples YYYY-MM-DD
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(v.trim())) {
+  return v.trim();
+}
+
+function asYmdOrThrow(v: any, field: string): string {
+  const s = asNonEmptyStringOrThrow(v, field);
+  // validação simples YYYY-MM-DD (range/ordem é validado no service)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) {
     throw new Error(`Payload inválido: ${field} deve ser YYYY-MM-DD`);
   }
-  return v.trim();
+  return s;
 }
 
 function assertPayload(raw: any): EnsureRangeJobPayload {
   if (!raw || typeof raw !== "object") throw new Error("Payload inválido");
 
-  const jobId = String(raw.jobId ?? "").trim();
-  const userId = String(raw.userId ?? "").trim();
-  const instagramAccountId = String(raw.instagramAccountId ?? "").trim();
-  const igUserId = String(raw.igUserId ?? "").trim();
-  const accessToken = String(raw.accessToken ?? "").trim();
+  const jobId = asNonEmptyStringOrThrow(raw.jobId, "jobId");
+  const userId = asNonEmptyStringOrThrow(raw.userId, "userId");
+  const instagramAccountId = asNonEmptyStringOrThrow(
+    raw.instagramAccountId,
+    "instagramAccountId"
+  );
+  const igUserId = asNonEmptyStringOrThrow(raw.igUserId, "igUserId");
+  const accessToken = asNonEmptyStringOrThrow(raw.accessToken, "accessToken");
   const from = asYmdOrThrow(raw.from, "from");
   const to = asYmdOrThrow(raw.to, "to");
-
-  if (!jobId) throw new Error("Payload inválido: jobId ausente");
-  if (!userId) throw new Error("Payload inválido: userId ausente");
-  if (!instagramAccountId) throw new Error("Payload inválido: instagramAccountId ausente");
-  if (!igUserId) throw new Error("Payload inválido: igUserId ausente");
-  if (!accessToken) throw new Error("Payload inválido: accessToken ausente");
 
   return { jobId, userId, instagramAccountId, igUserId, accessToken, from, to };
 }
 
+/**
+ * Atualiza progresso do job no banco.
+ * ✅ Só escreve quando vier número (evita gravar null/undefined).
+ */
 async function updateProgress(jobId: string, p: EnsureRangeProgress) {
+  const data: any = {};
+
+  if (typeof p.importedPosts === "number") data.importedCount = p.importedPosts;
+  if (typeof p.processedMetrics === "number") data.processedCount = p.processedMetrics;
+
+  // opcional: salvar mensagem de progresso (se existir no schema)
+  // se não existir, deixa comentado.
+  // if (typeof p.message === "string" && p.message.trim()) data.lastMessage = p.message.trim();
+
+  // se não tem nada pra atualizar, não bate no banco
+  if (Object.keys(data).length === 0) return;
+
   await prisma.instagramBackfillJob.update({
     where: { id: jobId },
-    data: {
-      importedCount: p.importedPosts,
-      processedCount: p.processedMetrics,
-    },
+    data,
   });
 }
 
@@ -96,7 +114,19 @@ async function main() {
         accessToken: payload.accessToken,
         from: payload.from,
         to: payload.to,
-        onProgress: async (p) => updateProgress(payload.jobId, p),
+
+        // ✅ progresso: não deixa falha de update derrubar o job
+        onProgress: async (p) => {
+          try {
+            await updateProgress(payload.jobId, p);
+          } catch (e) {
+            console.warn(
+              "[WORKER] Failed to persist progress (ignored):",
+              payload.jobId,
+              String((e as any)?.message ?? e)
+            );
+          }
+        },
       });
 
       // job finalizado com sucesso
@@ -117,9 +147,7 @@ async function main() {
       const message = String(err?.message ?? err ?? "unknown error");
       console.error("[WORKER] Job failed:", payload.jobId, message);
 
-      // ✅ IMPORTANTE: no seu schema os status parecem ser:
-      // queued | running | done | failed | cancelled
-      // então aqui usamos "failed" (não "error")
+      // ✅ IMPORTANTE: usa status compatível com seu schema
       await prisma.instagramBackfillJob.update({
         where: { id: payload.jobId },
         data: {
@@ -129,7 +157,7 @@ async function main() {
         },
       });
 
-      // relança para o consumer aplicar retry/DLQ
+      // relança para o consumer aplicar retry/DLQ (se estiver configurado)
       throw err;
     }
   });
@@ -146,14 +174,14 @@ main().catch(async (e) => {
 });
 
 // shutdown gracioso
-process.on("SIGINT", async () => {
-  console.log("[WORKER] Shutting down…");
-  await prisma.$disconnect();
-  process.exit(0);
-});
+async function shutdown(signal: string) {
+  console.log(`[WORKER] Shutting down… (${signal})`);
+  try {
+    await prisma.$disconnect();
+  } finally {
+    process.exit(0);
+  }
+}
 
-process.on("SIGTERM", async () => {
-  console.log("[WORKER] Shutting down…");
-  await prisma.$disconnect();
-  process.exit(0);
-});
+process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));

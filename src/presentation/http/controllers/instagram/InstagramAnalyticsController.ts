@@ -56,19 +56,6 @@ function listDays(from: string, to: string): string[] {
   return out;
 }
 
-function formatYmdInTz(date: Date, timeZone: string): string {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(date);
-  const y = parts.find((p) => p.type === "year")?.value ?? "0000";
-  const m = parts.find((p) => p.type === "month")?.value ?? "01";
-  const d = parts.find((p) => p.type === "day")?.value ?? "01";
-  return `${y}-${m}-${d}`;
-}
-
 function formatPostDateLabel(date: Date): string {
   const parts = new Intl.DateTimeFormat("pt-BR", {
     timeZone: "America/Sao_Paulo",
@@ -134,6 +121,11 @@ function toDate(v: any): Date | null {
   return Number.isFinite(d.getTime()) ? d : null;
 }
 
+function ymdUtcKey(d: Date): string {
+  // ✅ chave consistente (UTC) — resolve seu “01..30 não aparece”
+  return d.toISOString().slice(0, 10);
+}
+
 async function resolveInstagramAccount(userId: string, requestedId?: string) {
   const reqId = s(requestedId);
 
@@ -195,7 +187,6 @@ async function resolveInstagramAccount(userId: string, requestedId?: string) {
 }
 
 /**
- * IMPORTANTÍSSIMO:
  * AxiosInstagramGraphClient retorna media em camelCase:
  * - mediaType, mediaUrl, thumbnailUrl, likeCount, commentsCount, timestamp
  */
@@ -207,8 +198,6 @@ async function ensurePostsAndMetricsInRange(opts: {
   from: string;
   to: string;
   maxPosts?: number;
-
-  /** ✅ força gerar métricas mesmo que já tenha puxado nas últimas 24h */
   forceMetrics?: boolean;
 }) {
   const {
@@ -296,8 +285,8 @@ async function ensurePostsAndMetricsInRange(opts: {
         publishedAt,
         caption: it?.caption ?? null,
         permalink: it?.permalink ?? null,
-        likeCount: safeNum(it?.likeCount),
-        commentsCount: safeNum(it?.commentsCount),
+        likeCount: Math.trunc(safeNum(it?.likeCount)),
+        commentsCount: Math.trunc(safeNum(it?.commentsCount)),
         thumb,
       },
       update: {
@@ -305,8 +294,8 @@ async function ensurePostsAndMetricsInRange(opts: {
         publishedAt,
         caption: it?.caption ?? null,
         permalink: it?.permalink ?? null,
-        likeCount: safeNum(it?.likeCount),
-        commentsCount: safeNum(it?.commentsCount),
+        likeCount: Math.trunc(safeNum(it?.likeCount)),
+        commentsCount: Math.trunc(safeNum(it?.commentsCount)),
         thumb,
       },
     });
@@ -337,7 +326,6 @@ async function ensurePostsAndMetricsInRange(opts: {
 
   const byIgId = new Map(items.map((m) => [s(m?.id), m]));
 
-  // ✅ AQUI: força métricas se forceMetrics=true
   const toFetch = dbPosts.filter((p) => {
     if (forceMetrics) return true;
 
@@ -396,20 +384,48 @@ async function ensurePostsAndMetricsInRange(opts: {
   return { ensuredPosts: items.length, ensuredMetrics };
 }
 
+/* =========================================================
+   Helpers de cálculo do gráfico (Growth)
+========================================================= */
+
+function movingAvg(values: number[], window: number) {
+  const out: number[] = [];
+  let sum = 0;
+  const q: number[] = [];
+
+  for (const x of values) {
+    q.push(x);
+    sum += x;
+    if (q.length > window) sum -= q.shift()!;
+    out.push(q.length ? sum / q.length : 0);
+  }
+  return out;
+}
+
+function mean(arr: number[]) {
+  return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+}
+
+function std(arr: number[]) {
+  if (arr.length < 2) return 0;
+  const m = mean(arr);
+  const v = arr.reduce((acc, x) => acc + (x - m) ** 2, 0) / (arr.length - 1);
+  return Math.sqrt(v);
+}
+
 /**
- * ✅ NOVO: Análise de Crescimento (igual painel do Instagram)
- * - profile views (soma profileViewsTotal)
- * - interações (soma totalInteractions)
- * - novos seguidores (followers_last - followers_first)
- * - daily series para o gráfico
+ * ✅ Análise de Crescimento (TUDO NO GRÁFICO)
+ * Retorna apenas:
+ * daily: [{ day, crescimentoLiquido, mediaMovel7d, visualizacoesPerfil, interacoes, novosSeguidores, anomalia }]
  */
 export async function getInstagramGrowthAnalytics(req: Request, res: Response) {
   try {
     res.setHeader("Cache-Control", "no-store");
 
     const userId = getUserId(req);
-    if (!userId)
+    if (!userId) {
       return res.status(401).json({ ok: false, message: "Não autenticado" });
+    }
 
     const fromRaw = s(req.query.from);
     const toRaw = s(req.query.to);
@@ -434,19 +450,19 @@ export async function getInstagramGrowthAnalytics(req: Request, res: Response) {
         ok: true,
         instagramAccountId: null,
         filters: { from, to },
-        kpis: { profileViews: 0, interactions: 0, newFollowers: 0 },
         daily: listDays(from, to).map((d) => ({
           day: d,
-          profileViews: 0,
-          interactions: 0,
-          followers: null as number | null,
-          followersDelta: 0,
+          crescimentoLiquido: 0,
+          mediaMovel7d: 0,
+          visualizacoesPerfil: 0,
+          interacoes: 0,
+          novosSeguidores: 0,
+          anomalia: false,
         })),
         message: "Nenhuma conta do Instagram conectada",
       });
     }
 
-    // Busca as métricas diárias já salvas no banco
     const rows = await prisma.instagramAccountDailyMetrics.findMany({
       where: {
         userId,
@@ -460,102 +476,98 @@ export async function getInstagramGrowthAnalytics(req: Request, res: Response) {
       select: {
         day: true,
         followers: true,
-        reach: true,
         profileViewsTotal: true,
         totalInteractions: true,
       },
     });
 
-    // Map por dia (YYYY-MM-DD) para preencher série completa
+    // ✅ Map por dia usando UTC (SEM TZ) — resolve seu bug do mês “vazio”
     const byDay = new Map<
       string,
-      {
-        followers: number | null;
-        profileViewsTotal: number;
-        totalInteractions: number;
-      }
+      { followers: number | null; profileViews: number; interactions: number }
     >();
 
     for (const r of rows) {
       const d = r.day instanceof Date ? r.day : new Date(r.day as any);
-      const dayKey = d.toISOString().slice(0, 10);
+      const key = ymdUtcKey(d);
 
-      byDay.set(dayKey, {
+      byDay.set(key, {
         followers: r.followers ?? null,
-        profileViewsTotal: Math.trunc(safeNum(r.profileViewsTotal)),
-        totalInteractions: Math.trunc(safeNum(r.totalInteractions)),
+        profileViews: Math.trunc(safeNum(r.profileViewsTotal)),
+        interactions: Math.trunc(safeNum(r.totalInteractions)),
       });
     }
 
-    // KPIs do período (somatório)
-    const profileViews = rows.reduce(
-      (acc, r) => acc + Math.trunc(safeNum(r.profileViewsTotal)),
-      0,
-    );
-    const interactions = rows.reduce(
-      (acc, r) => acc + Math.trunc(safeNum(r.totalInteractions)),
-      0,
-    );
-
-    // Novos seguidores no período: lastFollowers - firstFollowers (apenas dias com followers != null)
-    const followersSeries = rows
-      .map((r) => ({
-        day: (r.day as Date).toISOString().slice(0, 10),
-        followers: r.followers,
-      }))
-      .filter((x) => x.followers !== null && x.followers !== undefined) as Array<{
-      day: string;
-      followers: number;
-    }>;
-
-    const firstFollowers =
-      followersSeries.length > 0 ? followersSeries[0].followers : null;
-    const lastFollowers =
-      followersSeries.length > 0
-        ? followersSeries[followersSeries.length - 1].followers
-        : null;
-
-    const newFollowers =
-      firstFollowers !== null && lastFollowers !== null
-        ? Math.trunc(lastFollowers - firstFollowers)
-        : 0;
-
-    // Série diária completa
     const days = listDays(from, to);
+
+    // 1) Série base
     let prevFollowers: number | null = null;
 
-    const daily = days.map((day) => {
+    const base = days.map((day) => {
       const v = byDay.get(day);
 
       const followers = v?.followers ?? null;
-      const followersDelta =
+
+      const crescimentoLiquido =
         followers !== null && prevFollowers !== null
           ? Math.trunc(followers - prevFollowers)
           : 0;
 
-      // atualiza prevFollowers só quando houver dado válido
       if (followers !== null) prevFollowers = followers;
+
+      const visualizacoesPerfil = v?.profileViews ?? 0;
+      const interacoes = v?.interactions ?? 0;
+
+      // “Novos seguidores” geralmente é só o positivo
+      const novosSeguidores = Math.max(0, crescimentoLiquido);
 
       return {
         day,
-        profileViews: v?.profileViewsTotal ?? 0,
-        interactions: v?.totalInteractions ?? 0,
-        followers,
-        followersDelta,
+        crescimentoLiquido,
+        visualizacoesPerfil,
+        interacoes,
+        novosSeguidores,
       };
     });
+
+    // 2) Média móvel 7d do crescimento líquido
+    const deltas = base.map((x) => x.crescimentoLiquido);
+    const ma7 = movingAvg(deltas, 7).map((v) => Math.round(v * 10) / 10);
+
+    // 3) Anomalia (z-score simples)
+    const m = mean(deltas);
+    const sd = std(deltas);
+    const k = 2.5;
+
+    const dailyAll = base.map((x, i) => {
+      const anomalia =
+        sd > 0 ? Math.abs(x.crescimentoLiquido - m) > k * sd : false;
+
+      return {
+        day: x.day,
+        crescimentoLiquido: x.crescimentoLiquido,
+        mediaMovel7d: ma7[i] ?? 0,
+        visualizacoesPerfil: x.visualizacoesPerfil,
+        interacoes: x.interacoes,
+        novosSeguidores: x.novosSeguidores,
+        anomalia,
+      };
+    });
+
+    // ✅ Se você quiser “só dias com algo”, descomenta isso:
+    // const daily = dailyAll.filter((d) =>
+    //   d.crescimentoLiquido !== 0 ||
+    //   d.visualizacoesPerfil !== 0 ||
+    //   d.interacoes !== 0 ||
+    //   d.novosSeguidores !== 0
+    // );
+
+    const daily = dailyAll;
 
     return res.json({
       ok: true,
       instagramAccountId: account.id,
       filters: { from, to },
-      kpis: {
-        profileViews: Math.trunc(profileViews),
-        interactions: Math.trunc(interactions),
-        newFollowers: Math.trunc(newFollowers),
-        firstFollowers,
-        lastFollowers,
-      },
       daily,
     });
   } catch (error: any) {
@@ -580,7 +592,6 @@ export async function getInstagramContentAnalytics(req: Request, res: Response) 
     const requestedAccountId = s(req.query.instagramAccountId);
     const limit = Math.max(5, Math.min(200, Number(req.query.limit ?? 60) || 60));
 
-    // ✅ adiciona force=1 pra testar
     const forceMetrics =
       s(req.query.force).toLowerCase() === "1" ||
       s(req.query.force).toLowerCase() === "true";
@@ -725,10 +736,7 @@ export async function getInstagramContentAnalytics(req: Request, res: Response) 
   }
 }
 
-export async function getInstagramEngagementAnalytics(
-  req: Request,
-  res: Response,
-) {
+export async function getInstagramEngagementAnalytics(req: Request, res: Response) {
   try {
     res.setHeader("Cache-Control", "no-store");
 
@@ -813,7 +821,7 @@ export async function getInstagramEngagementAnalytics(
     >();
 
     for (const p of posts) {
-      const day = formatYmdInTz(p.publishedAt as Date, "America/Sao_Paulo");
+      const day = ymdUtcKey(p.publishedAt as Date);
       const cur = map.get(day) ?? { likes: 0, comments: 0, saves: 0, shares: 0 };
 
       const m = p.metrics?.[0];
@@ -845,10 +853,7 @@ export async function getInstagramEngagementAnalytics(
   }
 }
 
-export async function getInstagramCorrelationAnalytics(
-  req: Request,
-  res: Response,
-) {
+export async function getInstagramCorrelationAnalytics(req: Request, res: Response) {
   try {
     res.setHeader("Cache-Control", "no-store");
 

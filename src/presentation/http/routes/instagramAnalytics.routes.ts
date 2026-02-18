@@ -1,4 +1,3 @@
-// src/presentation/http/routes/instagramAnalytics.routes.ts
 import { Router } from "express";
 import { authMiddleware } from "../middlewares/authMiddleware";
 
@@ -8,6 +7,11 @@ import {
   getInstagramCorrelationAnalytics,
   getInstagramContentAnalytics,
 } from "../controllers/instagram/InstagramAnalyticsController";
+
+import { getInstagramInsightsAnalytics } from "../controllers/instagram/InstagramInsightsController";
+
+// ✅ NOVO CONTROLLER (queda e saturação) — não altera o cálculo antigo
+import { getInstagramDropSaturationAnalytics } from "../controllers/instagram/InstagramDropSaturationController";
 
 const router = Router();
 
@@ -212,6 +216,105 @@ router.get("/analytics/correlation", getInstagramCorrelationAnalytics);
  *         description: Não autenticado
  */
 router.get("/analytics/content", getInstagramContentAnalytics);
+
+/**
+ * @openapi
+ * /api/instagram/analytics/insights:
+ *   get:
+ *     tags:
+ *       - Instagram Analytics
+ *     summary: Insights inteligentes do período (drivers, baseline, anomalias, predição)
+ *     description: |
+ *       Retorna insights estruturados e explicáveis para o período selecionado no calendário.
+ *       Ideal para a camada "IA" do Looma (por que cresceu / o que repetir / o que evitar).
+ *
+ *       Exemplos de insights:
+ *       - Crescimento acima do baseline histórico
+ *       - Picos/Quedas fora do padrão (anomalias)
+ *       - Drivers prováveis (tipo de conteúdo, horário, frequência) *(quando habilitados)*
+ *       - Predição simples (tendência) *(quando habilitada)*
+ *
+ *       - Range máximo: 30 dias
+ *       - Datas em formato YYYY-MM-DD
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: from
+ *         required: true
+ *         schema:
+ *           type: string
+ *           example: "2026-01-01"
+ *       - in: query
+ *         name: to
+ *         required: true
+ *         schema:
+ *           type: string
+ *           example: "2026-01-30"
+ *       - in: query
+ *         name: instagramAccountId
+ *         required: false
+ *         schema:
+ *           type: string
+ *           example: "963930d3-3ab5-45c7-ab74-93071128769f"
+ *     responses:
+ *       200:
+ *         description: Lista de insights do período
+ *       400:
+ *         description: Parâmetros inválidos
+ *       401:
+ *         description: Não autenticado
+ */
+router.get("/analytics/insights", getInstagramInsightsAnalytics);
+
+/**
+ * @openapi
+ * /api/instagram/analytics/drop-saturation:
+ *   get:
+ *     tags:
+ *       - Instagram Analytics
+ *     summary: Análise de Queda e Saturação do período (novo cálculo)
+ *     description: |
+ *       ✅ NOVO endpoint (não altera o /analytics/insights).
+ *
+ *       Retorna alertas/insights focados em:
+ *       - Quedas relevantes (reach, interações, visitas ao perfil) comparando
+ *         o período atual vs o período anterior (mesmo tamanho).
+ *       - Saturação por frequência: quando a frequência (posts/dia) aumenta,
+ *         mas a entrega/resultado médio cai.
+ *
+ *       - Range máximo: 30 dias
+ *       - Datas em formato YYYY-MM-DD
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: from
+ *         required: true
+ *         schema:
+ *           type: string
+ *           example: "2026-01-01"
+ *       - in: query
+ *         name: to
+ *         required: true
+ *         schema:
+ *           type: string
+ *           example: "2026-01-30"
+ *       - in: query
+ *         name: instagramAccountId
+ *         required: false
+ *         schema:
+ *           type: string
+ *           example: "963930d3-3ab5-45c7-ab74-93071128769f"
+ *     responses:
+ *       200:
+ *         description: Lista de insights de queda/saturação do período
+ *       400:
+ *         description: Parâmetros inválidos
+ *       401:
+ *         description: Não autenticado
+ */
+router.get("/analytics/drop-saturation", getInstagramDropSaturationAnalytics);
 
 /**
  * ✅ Export padrão + named (pra você poder importar do jeito que já estiver no projeto)

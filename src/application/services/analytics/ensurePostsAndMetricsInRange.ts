@@ -1,7 +1,12 @@
 // src/application/services/analytics/ensurePostsAndMetricsInRange.ts
 
+import axios from "axios";
 import { prisma } from "../../../infrastructure/db/prismaClient";
 import { AxiosInstagramGraphClient } from "../../../infrastructure/instagram/clients/AxiosInstagramGraphClient";
+
+/* ======================================================
+   Helpers (robustos)
+   ====================================================== */
 
 function s(v: any): string {
   return String(v ?? "").trim();
@@ -17,138 +22,104 @@ function safeInt(v: any): number {
   return Number.isFinite(n) ? Math.trunc(n) : 0;
 }
 
-// ✅ converte null/NaN em undefined (pra não mandar campo pro Prisma)
 function optionalNumber(v: any): number | undefined {
   if (v === null || v === undefined) return undefined;
   const n = Number(v);
   return Number.isFinite(n) ? n : undefined;
 }
 
-function parseYmdToUtcStart(ymd: string): Date {
-  return new Date(`${ymd}T00:00:00.000Z`);
-}
-
-function parseYmdToUtcEnd(ymd: string): Date {
-  return new Date(`${ymd}T23:59:59.999Z`);
-}
-
-// ✅ timestamp pode vir Date ou string
-function toDate(ts: any): Date | null {
-  if (!ts) return null;
-  if (ts instanceof Date) return ts;
-  const d = new Date(ts);
-  return Number.isFinite(d.getTime()) ? d : null;
-}
-
-// ✅ lê campos camelCase OU snake_case
-function getLikes(m: any): number {
-  return safeNum(m?.likeCount ?? m?.like_count ?? m?.likes ?? 0);
-}
-
-function getComments(m: any): number {
-  return safeNum(m?.commentsCount ?? m?.comments_count ?? m?.comments ?? 0);
-}
-
-function getMediaType(m: any): string | null {
-  return (m?.mediaType ?? m?.media_type ?? null) as any;
-}
-
-function getThumb(m: any): string | null {
-  return s(m?.thumbnailUrl ?? m?.thumbnail_url) || s(m?.mediaUrl ?? m?.media_url) || null;
+function assertYmd(ymd: string, label: string): string {
+  const v = s(ymd);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) {
+    throw new Error(
+      `[ensurePostsAndMetricsInRange] ${label} inválido: "${ymd}" (esperado YYYY-MM-DD)`
+    );
+  }
+  return v;
 }
 
 /**
- * ✅ tenta buscar insights por mídia (saved/shares/plays/video_views)
- * - suporta diferentes formatos de retorno do client
- * - se o client não implementar, retorna {} sem quebrar
+ * ✅ Constrói Date UTC sem depender do parser do JS.
  */
-async function getMediaInsightsSafe(
-  igClient: any,
-  mediaId: string,
-  accessToken: string
-): Promise<{
-  saves?: number;
-  shares?: number;
-  plays?: number;
-  videoViews?: number;
-}> {
-  try {
-    // Opção A: método genérico
-    if (typeof igClient.getMediaInsights === "function") {
-      const resp = await igClient.getMediaInsights({
-        mediaId,
-        accessToken,
-        metrics: ["saved", "shares", "plays", "video_views"],
-        timeoutMs: 15000,
-      });
-
-      // Formato 1: { saves, shares, plays, videoViews }
-      const directSaves = resp?.saves ?? resp?.saved ?? resp?.data?.saves ?? resp?.data?.saved;
-      const directShares = resp?.shares ?? resp?.data?.shares;
-      const directPlays = resp?.plays ?? resp?.data?.plays;
-      const directVideoViews =
-        resp?.videoViews ?? resp?.video_views ?? resp?.data?.videoViews ?? resp?.data?.video_views;
-
-      // se tiver algo direto
-      if (
-        directSaves != null ||
-        directShares != null ||
-        directPlays != null ||
-        directVideoViews != null
-      ) {
-        return {
-          saves: directSaves != null ? safeInt(directSaves) : undefined,
-          shares: directShares != null ? safeInt(directShares) : undefined,
-          plays: directPlays != null ? safeInt(directPlays) : undefined,
-          videoViews: directVideoViews != null ? safeInt(directVideoViews) : undefined,
-        };
-      }
-
-      // Formato 2: { data: [{name, total_value/value/values...}] }
-      const arr = Array.isArray(resp?.data) ? resp.data : [];
-      const map = new Map<string, number>();
-
-      for (const it of arr) {
-        const name = String(it?.name ?? "").toLowerCase();
-        const v =
-          it?.total_value?.value ??
-          it?.value ??
-          (Array.isArray(it?.values) ? it?.values?.[0]?.value : undefined) ??
-          0;
-
-        map.set(name, safeInt(v));
-      }
-
-      return {
-        saves: map.get("saved"),
-        shares: map.get("shares"),
-        plays: map.get("plays"),
-        videoViews: map.get("video_views"),
-      };
-    }
-
-    // Opção B: métodos específicos (se existir no seu client)
-    if (typeof igClient.getMediaSavedShares === "function") {
-      const resp = await igClient.getMediaSavedShares({
-        mediaId,
-        accessToken,
-        timeoutMs: 15000,
-      });
-      return {
-        saves: resp?.saves != null ? safeInt(resp.saves) : resp?.saved != null ? safeInt(resp.saved) : undefined,
-        shares: resp?.shares != null ? safeInt(resp.shares) : undefined,
-      };
-    }
-
-    return {};
-  } catch {
-    return {};
-  }
+function ymdToUtcDateStart(ymd: string): Date {
+  const v = assertYmd(ymd, "date");
+  const [yy, mm, dd] = v.split("-").map((x) => Number(x));
+  return new Date(Date.UTC(yy, mm - 1, dd, 0, 0, 0, 0));
 }
 
+function ymdToUtcDateEnd(ymd: string): Date {
+  const v = assertYmd(ymd, "date");
+  const [yy, mm, dd] = v.split("-").map((x) => Number(x));
+  return new Date(Date.UTC(yy, mm - 1, dd, 23, 59, 59, 999));
+}
+
+function ensureDate(d: any, label: string): Date {
+  if (!(d instanceof Date) || Number.isNaN(d.getTime())) {
+    throw new Error(
+      `[ensurePostsAndMetricsInRange] ${label} inválido (esperado Date): ${String(d)}`
+    );
+  }
+  return d;
+}
+
+function toUnixSeconds(d: Date): number {
+  return Math.floor(d.getTime() / 1000);
+}
+
+function utcYmdFromDate(d: Date): string {
+  const yy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
+}
+
+function listDaysInclusive(fromYmd: string, toYmd: string): string[] {
+  const from = assertYmd(fromYmd, "from");
+  const to = assertYmd(toYmd, "to");
+
+  const start = ymdToUtcDateStart(from);
+  const end = ymdToUtcDateStart(to);
+
+  if (start.getTime() > end.getTime()) {
+    throw new Error(
+      `[ensurePostsAndMetricsInRange] Range inválido: from(${from}) > to(${to})`
+    );
+  }
+
+  const out: string[] = [];
+  let cur = start;
+
+  while (cur.getTime() <= end.getTime()) {
+    out.push(utcYmdFromDate(cur));
+    cur = new Date(
+      Date.UTC(
+        cur.getUTCFullYear(),
+        cur.getUTCMonth(),
+        cur.getUTCDate() + 1,
+        0,
+        0,
+        0,
+        0
+      )
+    );
+  }
+
+  return out;
+}
+
+/* ======================================================
+   Types
+   ====================================================== */
+
 export type EnsureRangeProgress = {
-  importedPosts: number;
-  processedMetrics: number;
+  importedPosts?: number; // worker espera esse nome
+  processedMetrics?: number; // worker espera esse nome
+
+  ensuredPosts?: number;
+  ensuredMetrics?: number;
+  processedPostsMetrics?: number;
+
+  message?: string;
 };
 
 export type EnsurePostsAndMetricsInRangeInput = {
@@ -158,228 +129,596 @@ export type EnsurePostsAndMetricsInRangeInput = {
   accessToken: string;
   from: string; // YYYY-MM-DD
   to: string; // YYYY-MM-DD
-  maxPosts?: number;
-  onProgress?: (p: EnsureRangeProgress) => Promise<void> | void;
+  onProgress?: (p: EnsureRangeProgress) => void;
 };
+
+/* ======================================================
+   Graph helpers
+   ====================================================== */
+
+const GRAPH_VERSION = process.env.FB_GRAPH_VERSION || "v19.0";
+const GRAPH_BASE = `https://graph.facebook.com/${GRAPH_VERSION}`;
+
+async function graphGet<T = any>(
+  path: string,
+  accessToken: string,
+  params: Record<string, any> = {}
+): Promise<T> {
+  const url = `${GRAPH_BASE}${path.startsWith("/") ? "" : "/"}${path}`;
+  const res = await axios.get(url, {
+    params: { ...params, access_token: accessToken },
+    timeout: 60_000,
+  });
+  return res.data as T;
+}
+
+/**
+ * ✅ Busca followers_count atual do perfil (usado só pra seed quando não existe histórico)
+ */
+async function fetchFollowersCountNow(opts: {
+  igUserId: string;
+  accessToken: string;
+}): Promise<number> {
+  const { igUserId, accessToken } = opts;
+
+  try {
+    const res = await graphGet<{ followers_count?: number }>(
+      `/${igUserId}`,
+      accessToken,
+      { fields: "followers_count" }
+    );
+
+    const v = safeInt(res?.followers_count ?? 0);
+    return v > 0 ? v : 0;
+  } catch {
+    return 0;
+  }
+}
+
+type IgMediaEdge = {
+  id: string;
+  caption?: string;
+  media_type?: string;
+  media_url?: string;
+  thumbnail_url?: string;
+  permalink?: string;
+  timestamp?: string; // ISO
+};
+
+type IgMediaListResponse = {
+  data: IgMediaEdge[];
+  paging?: { next?: string };
+};
+
+async function fetchAllMediaInRange(opts: {
+  igUserId: string;
+  accessToken: string;
+  sinceUnix: number;
+  untilUnix: number;
+}): Promise<IgMediaEdge[]> {
+  const { igUserId, accessToken, sinceUnix, untilUnix } = opts;
+
+  const fields =
+    "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp";
+
+  let out: IgMediaEdge[] = [];
+  let nextUrl: string | null = null;
+
+  let page = await graphGet<IgMediaListResponse>(`/${igUserId}/media`, accessToken, {
+    fields,
+    limit: 50,
+    since: sinceUnix,
+    until: untilUnix,
+  });
+
+  out = out.concat(page.data ?? []);
+  nextUrl = page.paging?.next ?? null;
+
+  while (nextUrl) {
+    const res = await axios.get(nextUrl, { timeout: 60_000 });
+    const data = res.data as IgMediaListResponse;
+
+    out = out.concat(data.data ?? []);
+    nextUrl = data.paging?.next ?? null;
+  }
+
+  return out;
+}
+
+type InsightValue = { value: number; end_time?: string };
+type InsightItem = {
+  name: string;
+  period?: string;
+  values?: InsightValue[];
+  title?: string;
+};
+type InsightsResponse = { data: InsightItem[] };
+
+function pickInsightsByDay(
+  resp: InsightsResponse
+): Record<string, Record<string, number>> {
+  const byDay: Record<string, Record<string, number>> = {};
+
+  for (const metric of resp.data ?? []) {
+    const name = metric.name;
+    const values = metric.values ?? [];
+    for (const v of values) {
+      const end = v.end_time;
+      if (!end) continue;
+      const d = new Date(end);
+      const ymd = utcYmdFromDate(d);
+      byDay[ymd] = byDay[ymd] || {};
+      byDay[ymd][name] = safeNum(v.value);
+    }
+  }
+
+  return byDay;
+}
+
+async function fetchMediaInsightsDaily(opts: {
+  mediaId: string;
+  accessToken: string;
+  sinceUnix: number;
+  untilUnix: number;
+}): Promise<Record<string, Record<string, number>>> {
+  const { mediaId, accessToken, sinceUnix, untilUnix } = opts;
+
+  const metricCandidates = [
+    "reach",
+    "impressions",
+    "saved",
+    "comments",
+    "likes",
+    "shares",
+    "plays",
+    "video_views",
+  ];
+
+  const chunks: string[][] = [
+    ["reach", "impressions"],
+    ["likes", "comments", "saved", "shares"],
+    ["plays", "video_views"],
+  ];
+
+  const merged: Record<string, Record<string, number>> = {};
+
+  for (const metrics of chunks) {
+    try {
+      const resp = await graphGet<InsightsResponse>(
+        `/${mediaId}/insights`,
+        accessToken,
+        {
+          metric: metrics.join(","),
+          period: "day",
+          since: sinceUnix,
+          until: untilUnix,
+        }
+      );
+
+      const byDay = pickInsightsByDay(resp);
+      for (const day of Object.keys(byDay)) {
+        merged[day] = merged[day] || {};
+        for (const k of Object.keys(byDay[day])) {
+          merged[day][k] = safeNum(byDay[day][k]);
+        }
+      }
+    } catch {
+      // ignora lote que não existe pra esse tipo
+    }
+  }
+
+  for (const day of Object.keys(merged)) {
+    for (const m of metricCandidates) {
+      if (merged[day][m] === undefined) merged[day][m] = 0;
+    }
+  }
+
+  return merged;
+}
+
+async function fetchAccountInsightsDaily(opts: {
+  igUserId: string;
+  accessToken: string;
+  sinceUnix: number;
+  untilUnix: number;
+}): Promise<Record<string, Record<string, number>>> {
+  const { igUserId, accessToken, sinceUnix, untilUnix } = opts;
+
+  const metrics = ["profile_views", "reach"];
+
+  try {
+    const resp = await graphGet<InsightsResponse>(
+      `/${igUserId}/insights`,
+      accessToken,
+      {
+        metric: metrics.join(","),
+        period: "day",
+        since: sinceUnix,
+        until: untilUnix,
+      }
+    );
+    return pickInsightsByDay(resp);
+  } catch {
+    return {};
+  }
+}
+
+/* ======================================================
+   Main (fluxo completo)
+   ====================================================== */
 
 export async function ensurePostsAndMetricsInRange(
   opts: EnsurePostsAndMetricsInRangeInput
 ): Promise<{ ensuredPosts: number; ensuredMetrics: number }> {
-  const { userId, instagramAccountId, igUserId, accessToken, from, to, onProgress } = opts;
+  const userId = s(opts.userId);
+  const instagramAccountId = s(opts.instagramAccountId);
+  const igUserId = s(opts.igUserId);
+  const accessToken = s(opts.accessToken);
 
-  const maxPosts = Math.max(50, Math.min(800, Number(opts.maxPosts ?? 500) || 500));
+  const from = assertYmd(opts.from, "from");
+  const to = assertYmd(opts.to, "to");
 
-  const fromMs = parseYmdToUtcStart(from).getTime();
-  const toMs = parseYmdToUtcEnd(to).getTime();
+  const onProgress = opts.onProgress;
 
+  // compat (não usado diretamente aqui)
   const igClient = new AxiosInstagramGraphClient();
+  void igClient;
 
-  // =========================
-  // 1) Buscar mídias paginadas no IG
-  // =========================
-  const items: any[] = [];
-  let after: string | undefined;
-  let pages = 0;
-  const maxPages = 25;
+  const days = listDaysInclusive(from, to);
 
-  while (pages < maxPages && items.length < maxPosts) {
-    pages++;
+  // ✅ SEMPRE Date (UTC)
+  const fromStart = ensureDate(ymdToUtcDateStart(from), "fromStart");
+  const toEnd = ensureDate(ymdToUtcDateEnd(to), "toEnd");
 
-    const out = await igClient.getRecentMediaPaged({
-      igUserId,
-      accessToken,
-      limit: 50,
-      after,
-      timeoutMs: 15000,
-    });
+  const sinceUnix = toUnixSeconds(fromStart);
+  const untilUnix = toUnixSeconds(toEnd);
 
-    const rows = Array.isArray(out?.data) ? out.data : [];
-    if (!rows.length) break;
+  onProgress?.({
+    message: `Ensuring range ${from}..${to} (${days.length} dias)`,
+  });
 
-    let shouldStop = false;
+  /* ======================================================
+     1) DAILY METRICS (instagramAccountDailyMetrics)
+     ====================================================== */
 
-    for (const m of rows) {
-      const publishedAt = toDate(m?.timestamp);
-      if (!publishedAt) continue;
+  // pega último followers antes do range (pra forward-fill)
+  let lastBefore = await prisma.instagramAccountDailyMetrics.findFirst({
+    where: {
+      instagramAccountId,
+      userId,
+      day: { lt: fromStart }, // ✅ Date
+    },
+    orderBy: { day: "desc" },
+    select: { followers: true },
+  });
 
-      const tsMs = publishedAt.getTime();
+  // ✅ SEED followers se não existir histórico (ou vier 0)
+  if (!lastBefore?.followers || safeInt(lastBefore.followers) <= 0) {
+    const seedFollowers = await fetchFollowersCountNow({ igUserId, accessToken });
 
-      // se passou do range inferior, para (feed está em ordem desc)
-      if (tsMs < fromMs) {
-        shouldStop = true;
-        break;
-      }
+    if (seedFollowers > 0) {
+      const seedDay = new Date(fromStart.getTime() - 86400000); // from - 1 dia
 
-      // filtra range
-      if (tsMs < fromMs || tsMs > toMs) continue;
+      await prisma.instagramAccountDailyMetrics.upsert({
+        where: {
+          instagramAccountId_day: {
+            instagramAccountId,
+            day: seedDay,
+          },
+        },
+        create: {
+          userId,
+          instagramAccountId,
+          day: seedDay,
+          followers: seedFollowers,
+          profileViewsTotal: 0,
+          reach: 0,
+          totalInteractions: 0,
+        } as any,
+        update: {
+          followers: seedFollowers,
+        } as any,
+      });
 
-      // garante timestamp como Date pra todo o fluxo
-      items.push({ ...m, timestamp: publishedAt });
+      // atualiza pra o forward-fill começar certo
+      lastBefore = { followers: seedFollowers } as any;
+    }
+  }
 
-      if (items.length >= maxPosts) break;
+  let lastFollowers = safeInt(lastBefore?.followers ?? 0);
+
+  const existing = await prisma.instagramAccountDailyMetrics.findMany({
+    where: {
+      instagramAccountId,
+      userId,
+      day: { gte: fromStart, lte: toEnd }, // ✅ Date
+    },
+    orderBy: { day: "asc" },
+    select: { day: true, followers: true },
+  });
+
+  const followersByDay = new Map<string, number>();
+  for (const row of existing) {
+    followersByDay.set(utcYmdFromDate(row.day), safeInt(row.followers ?? 0));
+  }
+
+  let ensuredMetrics = 0;
+
+  for (const dayYmd of days) {
+    const dayDate = ensureDate(ymdToUtcDateStart(dayYmd), `dayDate(${dayYmd})`);
+
+    // forward-fill
+    if (followersByDay.has(dayYmd)) {
+      const v = followersByDay.get(dayYmd)!;
+      if (Number.isFinite(v) && v > 0) lastFollowers = v;
     }
 
-    const nextAfter = out?.paging?.cursors?.after;
-    if (!nextAfter || shouldStop) break;
-    after = nextAfter;
-  }
-
-  if (!items.length) {
-    await onProgress?.({ importedPosts: 0, processedMetrics: 0 });
-    return { ensuredPosts: 0, ensuredMetrics: 0 };
-  }
-
-  // =========================
-  // 2) Upsert posts (DB)
-  // =========================
-  let importedPosts = 0;
-
-  for (const it of items) {
-    const igMediaId = s(it?.id);
-    if (!igMediaId) continue;
-
-    const publishedAt = it.timestamp instanceof Date ? it.timestamp : toDate(it.timestamp);
-    if (!publishedAt) continue;
-
-    const thumb = getThumb(it);
-
-    await prisma.instagramPost.upsert({
-      where: { instagramAccountId_igMediaId: { instagramAccountId, igMediaId } },
+    await prisma.instagramAccountDailyMetrics.upsert({
+      where: {
+        instagramAccountId_day: {
+          instagramAccountId,
+          day: dayDate,
+        },
+      },
       create: {
         userId,
         instagramAccountId,
-        igMediaId,
-        mediaType: getMediaType(it),
-        publishedAt,
-        caption: it.caption ?? null,
-        permalink: it.permalink ?? null,
-        likeCount: safeInt(getLikes(it)),
-        commentsCount: safeInt(getComments(it)),
-        thumb,
-      },
+        day: dayDate,
+        followers: lastFollowers,
+        profileViewsTotal: 0,
+        reach: 0,
+        totalInteractions: 0,
+      } as any,
       update: {
-        mediaType: getMediaType(it),
-        publishedAt,
-        caption: it.caption ?? null,
-        permalink: it.permalink ?? null,
-        likeCount: safeInt(getLikes(it)),
-        commentsCount: safeInt(getComments(it)),
-        thumb,
-      },
+        followers: lastFollowers,
+      } as any,
     });
 
-    importedPosts++;
-    if (importedPosts % 25 === 0) {
-      await onProgress?.({ importedPosts, processedMetrics: 0 });
+    ensuredMetrics++;
+    if (ensuredMetrics % 5 === 0) {
+      onProgress?.({
+        ensuredMetrics,
+        processedMetrics: ensuredMetrics,
+      });
     }
   }
 
-  await onProgress?.({ importedPosts, processedMetrics: 0 });
+  /* ======================================================
+     2) POSTS (instagramPost)
+     ====================================================== */
 
-  // =========================
-  // 3) Buscar posts no DB dentro do range
-  // =========================
-  const dbPosts = await prisma.instagramPost.findMany({
+  onProgress?.({ message: "Buscando posts do período (Graph API)..." });
+
+  const apiMedia = await fetchAllMediaInRange({
+    igUserId,
+    accessToken,
+    sinceUnix,
+    untilUnix,
+  });
+
+  let ensuredPosts = 0;
+
+  for (const m of apiMedia) {
+    const igMediaId = s(m.id);
+    if (!igMediaId) continue;
+
+    const publishedAt =
+      m.timestamp && !Number.isNaN(new Date(m.timestamp).getTime())
+        ? new Date(m.timestamp)
+        : null;
+
+    // corta fora do range (se vier timestamp)
+    if (publishedAt) {
+      if (publishedAt.getTime() < fromStart.getTime()) continue;
+      if (publishedAt.getTime() > toEnd.getTime()) continue;
+    }
+
+    const existingPost = await prisma.instagramPost.findFirst({
+      where: {
+        userId,
+        instagramAccountId,
+        igMediaId,
+      } as any,
+      select: { id: true },
+    });
+
+    const postData = {
+      caption: m.caption ?? null,
+      mediaType: m.media_type ?? null,
+      thumb: m.thumbnail_url ?? m.media_url ?? null,
+    };
+
+    if (existingPost?.id) {
+      await prisma.instagramPost.update({
+        where: { id: existingPost.id },
+        data: {
+          ...postData,
+          ...(publishedAt ? { publishedAt } : {}),
+        } as any,
+      });
+    } else {
+      await prisma.instagramPost.create({
+        data: {
+          userId,
+          instagramAccountId,
+          igMediaId,
+          ...postData,
+          publishedAt: publishedAt ?? fromStart,
+        } as any,
+      });
+    }
+
+    ensuredPosts++;
+    if (ensuredPosts % 10 === 0) {
+      onProgress?.({
+        ensuredPosts,
+        importedPosts: ensuredPosts,
+      });
+    }
+  }
+
+  const ensuredDbPosts = await prisma.instagramPost.findMany({
     where: {
       userId,
       instagramAccountId,
-      publishedAt: {
-        gte: parseYmdToUtcStart(from),
-        lte: parseYmdToUtcEnd(to),
-      },
-    },
+      publishedAt: { gte: fromStart, lte: toEnd },
+    } as any,
     select: {
       id: true,
       igMediaId: true,
-      likeCount: true,
-      commentsCount: true,
-      metrics: {
-        orderBy: { pulledAt: "desc" },
-        take: 1,
-        select: { pulledAt: true },
-      },
-    },
+      publishedAt: true,
+    } as any,
   });
 
-  // map do que veio do IG (pra fallback)
-  const byIgId = new Map(items.map((m) => [s(m?.id), m]));
+  /* ======================================================
+     3) MÉTRICAS DIÁRIAS POR POST (instagramPostMetric)
+     ====================================================== */
 
-  // pega posts que precisam atualizar (mais de 24h sem métrica)
-  const toFetch = dbPosts.filter((p) => {
-    const last = p.metrics?.[0]?.pulledAt;
-    if (!last) return true;
-    return Date.now() - new Date(last).getTime() > 24 * 60 * 60 * 1000;
-  });
+  onProgress?.({ message: "Buscando insights diários dos posts..." });
 
-  // =========================
-  // 4) Criar métricas por post (reach + insights)
-  // =========================
-  let ensuredMetrics = 0;
+  const agg: Record<
+    string,
+    { reach: number; likes: number; comments: number; saves: number; shares: number }
+  > = {};
 
-  // concurrency 2
-  let idx = 0;
-  const workers = Array.from({ length: Math.min(2, toFetch.length) }, async () => {
-    while (idx < toFetch.length) {
-      const cur = toFetch[idx++];
-      const igMediaId = s(cur.igMediaId);
-      if (!igMediaId) continue;
+  let processedPostsMetrics = 0;
 
-      try {
-        const reach = await igClient.getMediaReach({
-          mediaId: igMediaId,
-          accessToken,
-          timeoutMs: 15000,
-        });
+  for (const post of ensuredDbPosts as any[]) {
+    const igMediaId = s(post.igMediaId);
+    const postId = s(post.id);
+    if (!igMediaId || !postId) continue;
 
-        const m = byIgId.get(igMediaId);
+    const insightsByDay = await fetchMediaInsightsDaily({
+      mediaId: igMediaId,
+      accessToken,
+      sinceUnix,
+      untilUnix,
+    });
 
-        // ✅ likes/comments corretos (camelCase + fallback)
-        const likes = safeInt(m ? getLikes(m) : cur.likeCount);
-        const comments = safeInt(m ? getComments(m) : cur.commentsCount);
+    for (const dayYmd of days) {
+      const dayDate = ensureDate(
+        ymdToUtcDateStart(dayYmd),
+        `postDayDate(${dayYmd})`
+      );
 
-        // ✅ insights (saves/shares/plays/videoViews) — pode vir vazio
-        const insights = await getMediaInsightsSafe(igClient as any, igMediaId, accessToken);
+      const m = insightsByDay[dayYmd] || {};
 
-        const saves = safeInt(insights.saves ?? 0);
-        const shares = safeInt(insights.shares ?? 0);
+      const reach = safeInt(m.reach ?? 0);
+      const likes = safeInt(m.likes ?? 0);
+      const comments = safeInt(m.comments ?? 0);
+      const saves = safeInt(m.saved ?? 0);
+      const shares = safeInt(m.shares ?? 0);
 
-        const plays = optionalNumber(insights.plays);
-        const videoViews = optionalNumber(insights.videoViews);
+      const totalInteractions = likes + comments + saves + shares;
 
-        const totalInteractions = safeInt(likes + comments + shares + saves);
+      const upd = await prisma.instagramPostMetric.updateMany({
+        where: {
+          postId,
+          pulledAt: dayDate,
+        },
+        data: {
+          reach,
+          likes,
+          comments,
+          saves,
+          shares,
+          totalInteractions,
+        },
+      });
 
+      if ((upd?.count ?? 0) === 0) {
         await prisma.instagramPostMetric.create({
           data: {
-            postId: cur.id,
-            pulledAt: new Date(),
-
-            reach: safeInt(reach),
+            postId,
+            pulledAt: dayDate,
+            reach,
             likes,
             comments,
-            shares,
             saves,
-
-            plays,
-            videoViews,
-
+            shares,
             totalInteractions,
           },
         });
-
-        ensuredMetrics++;
-
-        if (ensuredMetrics % 10 === 0) {
-          await onProgress?.({ importedPosts, processedMetrics: ensuredMetrics });
-        }
-      } catch {
-        // ignora: não quebra o job
       }
+
+      agg[dayYmd] =
+        agg[dayYmd] || ({ reach: 0, likes: 0, comments: 0, saves: 0, shares: 0 });
+
+      agg[dayYmd].reach += reach;
+      agg[dayYmd].likes += likes;
+      agg[dayYmd].comments += comments;
+      agg[dayYmd].saves += saves;
+      agg[dayYmd].shares += shares;
     }
+
+    processedPostsMetrics++;
+    if (processedPostsMetrics % 5 === 0) {
+      onProgress?.({ processedPostsMetrics });
+    }
+  }
+
+  /* ======================================================
+     4) ACCOUNT INSIGHTS + UPDATE DailyMetrics
+     ====================================================== */
+
+  onProgress?.({
+    message: "Atualizando métricas diárias agregadas (account)...",
   });
 
-  await Promise.all(workers);
+  const accountInsights = await fetchAccountInsightsDaily({
+    igUserId,
+    accessToken,
+    sinceUnix,
+    untilUnix,
+  });
 
-  await onProgress?.({ importedPosts, processedMetrics: ensuredMetrics });
+  for (const dayYmd of days) {
+    const dayDate = ensureDate(
+      ymdToUtcDateStart(dayYmd),
+      `accDayDate(${dayYmd})`
+    );
 
-  return { ensuredPosts: importedPosts, ensuredMetrics };
+    const postAgg =
+      agg[dayYmd] || ({ reach: 0, likes: 0, comments: 0, saves: 0, shares: 0 });
+
+    const acc = accountInsights[dayYmd] || {};
+    const profileViewsTotal = safeInt(acc.profile_views ?? 0);
+
+    const reachFromAccount = optionalNumber(acc.reach);
+    const reach =
+      reachFromAccount !== undefined
+        ? safeInt(reachFromAccount)
+        : safeInt(postAgg.reach);
+
+    const totalInteractions =
+      safeInt(postAgg.likes) +
+      safeInt(postAgg.comments) +
+      safeInt(postAgg.saves) +
+      safeInt(postAgg.shares);
+
+    await prisma.instagramAccountDailyMetrics.update({
+      where: {
+        instagramAccountId_day: {
+          instagramAccountId,
+          day: dayDate,
+        },
+      },
+      data: {
+        profileViewsTotal,
+        reach,
+        totalInteractions,
+      } as any,
+    });
+  }
+
+  onProgress?.({
+    message: "Ensure finalizado ✅",
+    ensuredPosts,
+    ensuredMetrics,
+    importedPosts: ensuredPosts,
+    processedMetrics: ensuredMetrics,
+    processedPostsMetrics,
+  });
+
+  return { ensuredPosts, ensuredMetrics };
 }

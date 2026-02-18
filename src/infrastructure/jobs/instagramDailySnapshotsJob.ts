@@ -19,6 +19,11 @@ function toFiniteNumber(v: any): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+function safeInt(v: any): number {
+  const n = Number(v ?? 0);
+  return Number.isFinite(n) ? Math.trunc(n) : 0;
+}
+
 function ymdUtc(d: Date) {
   const y = d.getUTCFullYear();
   const m = String(d.getUTCMonth() + 1).padStart(2, "0");
@@ -26,12 +31,20 @@ function ymdUtc(d: Date) {
   return `${y}-${m}-${day}`;
 }
 
+/**
+ * ✅ Cria Date UTC sem depender do parser de string.
+ */
 function dayDateUtc(ymd: string) {
-  return new Date(`${ymd}T00:00:00.000Z`);
+  const s = String(ymd ?? "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    throw new Error(`[DailySnapshotsJob] ymd inválido: "${ymd}"`);
+  }
+  const [yy, mm, dd] = s.split("-").map((x) => Number(x));
+  return new Date(Date.UTC(yy, mm - 1, dd, 0, 0, 0, 0));
 }
 
 function isTokenLikelyInvalid(reason: string) {
-  const msg = reason.toLowerCase();
+  const msg = String(reason ?? "").toLowerCase();
   return (
     msg.includes("oauth") ||
     msg.includes("token") ||
@@ -42,12 +55,21 @@ function isTokenLikelyInvalid(reason: string) {
 }
 
 function extractGraphErrorMessage(e: any): string {
-  return String(
-    e?.response?.data?.error?.message ||
-      e?.response?.data?.message ||
-      e?.message ||
-      "unknown_error"
-  );
+  // Graph costuma vir em: response.data.error.message
+  const msg =
+    e?.response?.data?.error?.message ??
+    e?.response?.data?.error?.error_user_msg ??
+    e?.response?.data?.message ??
+    e?.message ??
+    "unknown_error";
+
+  const code =
+    e?.response?.data?.error?.code ??
+    e?.response?.data?.error?.error_subcode ??
+    e?.response?.status ??
+    "";
+
+  return code ? `${msg} (code:${code})` : String(msg);
 }
 
 /**
@@ -88,8 +110,8 @@ async function fetchIgInsightDayMetric(opts: {
     const rows = Array.isArray(res.data?.data) ? res.data.data : [];
     const row = rows.find((x: any) => x?.name === metric);
 
-    // Para period=day geralmente vem: values: [{ value, end_time }]
-    // Para alguns casos vem total_value
+    // period=day geralmente: values: [{ value, end_time }]
+    // em alguns casos: total_value
     const value =
       row?.values?.[0]?.value ??
       row?.total_value?.value ??
@@ -100,7 +122,6 @@ async function fetchIgInsightDayMetric(opts: {
     return toFiniteNumber(value);
   } catch (e: any) {
     const reason = extractGraphErrorMessage(e);
-    // 🔥 NÃO mascarar erro -> propaga
     throw new Error(`[IG][INSIGHTS:${metric}] ${reason}`);
   }
 }
@@ -126,10 +147,8 @@ async function fetchProfileViewsTotalForDay(opts: {
 }
 
 /**
- * Soma o total de interações a partir do retorno atual de fetchDailyInteractionsByPosts,
- * que é um array DailyInteractions[] (sem totalByDay).
- *
- * Como o shape pode variar entre versões, tentamos campos comuns e caímos em "0".
+ * Soma o total de interações a partir do retorno de fetchDailyInteractionsByPosts,
+ * que pode variar de shape.
  */
 function sumTotalInteractionsForYmd(
   dailyInteractions: any,
@@ -143,16 +162,15 @@ function sumTotalInteractionsForYmd(
       (it as any).ymd ?? (it as any).day ?? (it as any).date ?? ""
     ).slice(0, 10);
 
-    // tenta reconhecer o total em campos comuns
     const maybeTotal =
       (it as any).total ??
       (it as any).totalInteractions ??
       (it as any).interactions ??
       (it as any).value ??
-      // ou somatório de componentes comuns (caso exista)
+      // ou soma componentes
       toFiniteNumber((it as any).likes ?? 0) +
         toFiniteNumber((it as any).comments ?? 0) +
-        toFiniteNumber((it as any).saved ?? 0) +
+        toFiniteNumber((it as any).saved ?? (it as any).saves ?? 0) +
         toFiniteNumber((it as any).shares ?? 0);
 
     // se não tem ymd (array já pode ser só do dia), soma mesmo
@@ -185,7 +203,7 @@ export async function runInstagramDailySnapshotsJob(opts?: {
 
   const graph = axios.create({
     baseURL: graphBaseUrl,
-    timeout: 20000,
+    timeout: 20_000,
   });
 
   const targetYmd = (opts?.ymd ?? ymdUtc(new Date())).slice(0, 10);
@@ -193,7 +211,7 @@ export async function runInstagramDailySnapshotsJob(opts?: {
 
   // ✅ desde 00:00 UTC
   const since = Math.floor(day.getTime() / 1000);
-  // ✅ até 24h depois (padrão mais seguro no Graph)
+  // ✅ até 24h depois
   const until = since + 86400;
 
   const limit = Math.max(1, Math.min(500, Number(opts?.limit ?? 200)));
@@ -236,9 +254,9 @@ export async function runInstagramDailySnapshotsJob(opts?: {
       const profileRes = await graph.get(`/${igUserId}`, {
         params: { fields: "followers_count", access_token: accessToken },
       });
-      const followers = toFiniteNumber(profileRes.data?.followers_count);
+      const followers = safeInt(profileRes.data?.followers_count);
 
-      // 2) profile views (Insights day) ✅ agora com metric_type=total_value internamente
+      // 2) profile views (Insights day)
       const profileViewsTotal = await fetchProfileViewsTotalForDay({
         graph,
         igUserId,
@@ -257,7 +275,6 @@ export async function runInstagramDailySnapshotsJob(opts?: {
       });
 
       // 4) interactions por posts (REAL)
-      // ✅ novo contrato: fetchDailyInteractionsByPosts(graphClient, input)
       const dailyInteractions = await fetchDailyInteractionsByPosts(graph as any, {
         igUserId,
         accessToken,
